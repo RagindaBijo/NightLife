@@ -3,6 +3,7 @@ import { useFocusEffect } from "expo-router";
 import { useCallback, useState } from "react";
 import { ActivityIndicator, Pressable, Text, TextInput, View } from "react-native";
 import { api } from "../../lib/api";
+import CompleteProfileNotice from "../CompleteProfileNotice";
 import { useI18n } from "../../lib/i18n";
 import { makeStyles, useTheme } from "../../lib/theme-context";
 import { MIN_AGE, birthDateToIso, maskBirthDate } from "../../lib/validation";
@@ -67,6 +68,9 @@ export default function SocialGate({ children }) {
   }
   if (!access.is_adult) {
     return <Notice icon="lock-outline" title={t("socialGate.adultsTitle")} text={t("socialGate.adultsText")} />;
+  }
+  if (access.profile_complete === false) {
+    return <CompleteProfileNotice />;
   }
   return children;
 }

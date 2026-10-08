@@ -18,6 +18,7 @@ import ReportSheet from "../../../components/ReportSheet";
 import { API_URL, api, getSession } from "../../../lib/api";
 import { formatClock, formatTimeLeft } from "../../../lib/format";
 import { useI18n } from "../../../lib/i18n";
+import { refreshUnread } from "../../../lib/unread";
 import { makeStyles, useTheme } from "../../../lib/theme-context";
 
 const WS_URL = API_URL.replace(/^http/, "ws");
@@ -124,7 +125,9 @@ export default function ChatDetail() {
   const lastTheirs = [...messages].reverse().find((m) => m.sender_id !== me);
   useEffect(() => {
     if (!lastTheirs || ended) return;
-    api(`/api/chats/${chatId}/read`, { method: "PUT", body: { message_id: lastTheirs.id } }).catch(() => {});
+    api(`/api/chats/${chatId}/read`, { method: "PUT", body: { message_id: lastTheirs.id } })
+      .then(refreshUnread)
+      .catch(() => {});
   }, [lastTheirs?.id, chatId, ended]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Countdown: refresh every minute, and end the chat when time is up

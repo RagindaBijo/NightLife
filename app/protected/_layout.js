@@ -7,6 +7,7 @@ import { getSession } from "../../lib/api";
 import { useI18n } from "../../lib/i18n";
 import { usePushNotifications } from "../../lib/push";
 import { UserTypeContext } from "../../lib/session-context";
+import { useUnreadCount, useUnreadPolling } from "../../lib/unread";
 import { useTheme } from "../../lib/theme-context";
 
 export default function Layout() {
@@ -30,6 +31,9 @@ export default function Layout() {
 
   // Push notifications for matches, requests and messages (personal accounts)
   usePushNotifications({ enabled: authState === "in" && userType === "1" });
+  // Badge on the Chat tab: unread messages + waiting requests
+  useUnreadPolling({ enabled: authState === "in" && userType === "1" });
+  const unread = useUnreadCount();
 
   // Auth guard: protected screens need a logged-in session
   if (authState === "checking") {
@@ -84,6 +88,16 @@ export default function Layout() {
             }}
           />
 
+          <Tabs.Screen
+            name="social"
+            options={{
+              title: t("tabs.social"),
+              tabBarIcon: ({ color, size }) => (
+                <Entypo name="network" size={size} color={color} />
+              ),
+            }}
+          />
+
           {/* Discover and Chat are for people (18+), not venues */}
           <Tabs.Screen
             name="discover"
@@ -97,20 +111,12 @@ export default function Layout() {
           />
 
           <Tabs.Screen
-            name="social"
-            options={{
-              title: t("tabs.social"),
-              tabBarIcon: ({ color, size }) => (
-                <Entypo name="network" size={size} color={color} />
-              ),
-            }}
-          />
-
-          <Tabs.Screen
             name="chat-folder"
             options={{
               title: t("tabs.chat"),
               href: isVenue ? null : undefined,
+              tabBarBadge: unread > 0 ? (unread > 99 ? "99+" : unread) : undefined,
+              tabBarBadgeStyle: { backgroundColor: COLORS.accentPink, color: "#FFFFFF", fontSize: 11 },
               tabBarIcon: ({ color, size }) => (
                 <FontAwesome name="wechat" size={size} color={color} />
               ),

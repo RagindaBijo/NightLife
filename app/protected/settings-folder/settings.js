@@ -396,7 +396,12 @@ export default function Settings() {
             onPress={() => router.push("/protected/settings-folder/blocked")}
           />
           <Row icon="notifications-none" label={t("settings.notifications")} badge={t("settings.soon")} />
-          <Row icon="lock-outline" label={t("settings.passwordSecurity")} badge={t("settings.soon")} last />
+          <Row
+            icon="lock-outline"
+            label={t("settings.changePassword")}
+            onPress={() => router.push("/protected/settings-folder/change-password")}
+            last
+          />
         </Section>
 
         {!isVenue && hidden !== null && (

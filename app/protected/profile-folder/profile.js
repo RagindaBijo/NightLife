@@ -15,6 +15,7 @@ import {
   Text,
   View,
 } from "react-native";
+import CompleteProfileNotice, { missingProfileFields } from "../../../components/CompleteProfileNotice";
 import FavoriteStar from "../../../components/FavoriteStar";
 import InterestCheck from "../../../components/InterestCheck";
 import SwipeableTabContent from "../../../components/SwipeableTabContent";
@@ -230,6 +231,8 @@ export default function Profile() {
         followers: userData.followers_count,
         following: userData.following_count,
         posts: userData.posts_count,
+        // Photo, names and username: until all are set the profile is hidden
+        missing: userData.profile_complete === false ? missingProfileFields(userData) : [],
       });
       setError(null);
       return session.userId;
@@ -569,6 +572,8 @@ export default function Profile() {
 
         <Text style={styles.name}>{user.name}</Text>
         {!!user.bio && <Text style={styles.bio}>{user.bio}</Text>}
+
+        {user.missing.length > 0 && <CompleteProfileNotice missing={user.missing} compact />}
 
         <View style={styles.actions}>
           <ActionButton

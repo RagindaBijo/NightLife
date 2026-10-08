@@ -126,6 +126,27 @@ export const NOT_BLOCKED_SQL = (column) => `
   ${column} NOT IN (SELECT blocked_id FROM blocks WHERE blocker_id = ?)
   AND ${column} NOT IN (SELECT blocker_id FROM blocks WHERE blocked_id = ?)`;
 
+// ── Complete profiles ────────────────────────────
+
+/**
+ * A personal account is "complete" with a username, first name, last name and
+ * profile photo (bio is optional). Incomplete accounts can't post, chat or use
+ * Discover, and nobody else can see them.
+ */
+export const COMPLETE_PROFILE_SQL = (alias) => `(
+  COALESCE(TRIM(${alias}.username), '') != ''
+  AND COALESCE(TRIM(${alias}.first_name), '') != ''
+  AND COALESCE(TRIM(${alias}.last_name), '') != ''
+  AND COALESCE(${alias}.profile_photo, '') != '')`;
+
+/** Same rule for a profile row already loaded in JavaScript. */
+export const isProfileComplete = (profile) =>
+  !!profile &&
+  !!profile.username?.trim() &&
+  !!profile.first_name?.trim() &&
+  !!profile.last_name?.trim() &&
+  !!profile.profile_photo;
+
 // ── Images ───────────────────────────────────────
 
 export const IMAGE_DOMAIN = "https://night-life-api.elevator-rand.workers.dev/images";

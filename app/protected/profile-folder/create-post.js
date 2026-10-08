@@ -16,6 +16,7 @@ import {
   TextInput,
   View,
 } from "react-native";
+import CompleteProfileNotice, { missingProfileFields } from "../../../components/CompleteProfileNotice";
 import { api, getSession } from "../../../lib/api";
 import { translate, useI18n } from "../../../lib/i18n";
 import { makeStyles, useTheme } from "../../../lib/theme-context";
@@ -36,6 +37,17 @@ export default function CreatePost() {
   const [locationFocused, setLocationFocused] = useState(false);
   const [captionFocused, setCaptionFocused] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [missing, setMissing] = useState([]); // required profile fields still empty
+
+  // Posting needs a complete profile (photo, names, username)
+  useEffect(() => {
+    getSession()
+      .then((session) => api(`/api/user/${session.userId}`))
+      .then((profile) => {
+        if (profile.profile_complete === false) setMissing(missingProfileFields(profile));
+      })
+      .catch(() => {}); // the server checks again when posting
+  }, []);
 
   // Venue names for the location suggestions (a failure just means no suggestions)
   useEffect(() => {
@@ -146,6 +158,10 @@ export default function CreatePost() {
       router.back();
     } catch (error) {
       console.error("Create Post Error:", error.message);
+      if (error.code === "profile_incomplete") {
+        setMissing(["photo", "firstName", "lastName", "username"]);
+        return;
+      }
       Alert.alert(
         t("createPost.shareError"),
         error.status === 0
@@ -156,6 +172,8 @@ export default function CreatePost() {
       setUploading(false);
     }
   };
+
+  if (missing.length > 0) return <CompleteProfileNotice missing={missing} />;
 
   return (
     <KeyboardAvoidingView

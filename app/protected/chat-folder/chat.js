@@ -6,6 +6,7 @@ import { ActivityIndicator, Alert, FlatList, Pressable, RefreshControl, Text, Vi
 import SocialGate from "../../../components/social/SocialGate";
 import { api, getSession } from "../../../lib/api";
 import { formatTimeLeft } from "../../../lib/format";
+import { refreshUnread } from "../../../lib/unread";
 import { useI18n } from "../../../lib/i18n";
 import { makeStyles, useTheme } from "../../../lib/theme-context";
 
@@ -49,6 +50,7 @@ function ChatList() {
         ([chats, requests, session]) => {
           setData({ chats, requests, me: Number(session?.userId) });
           setError(null);
+          refreshUnread();
         },
         (err) => setError(err.status === 0 ? t("common.cantConnect") : err.message),
       ),

@@ -18,7 +18,7 @@ import { useI18n } from "../lib/i18n";
 import { makeStyles, useTheme } from "../lib/theme-context";
 
 // Same list as REPORT_REASONS in the worker
-export const REPORT_REASONS = ["fake_account", "harassment", "sexual_content", "other"];
+export const REPORT_REASONS = ["fake_account", "sexual_content", "other"];
 
 /**
  * Report a user, post or venue: pick a reason, optionally add details, send.

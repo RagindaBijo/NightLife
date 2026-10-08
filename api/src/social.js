@@ -11,6 +11,7 @@
  */
 import { DurableObject } from "cloudflare:workers";
 import {
+  COMPLETE_PROFILE_SQL,
   HttpError,
   NOT_BLOCKED_SQL,
   ageFrom,
@@ -51,7 +52,10 @@ function adultBirthCutoff() {
 async function requireAdultUser(db, user) {
   requireUser(user);
   const me = await db
-    .prepare("SELECT id, user_type, birth_date FROM login_data WHERE id = ?")
+    .prepare(
+      `SELECT ld.id, ld.user_type, ld.birth_date, ${COMPLETE_PROFILE_SQL("up")} AS complete
+       FROM login_data ld LEFT JOIN user_profile up ON up.id = ld.id WHERE ld.id = ?`,
+    )
     .bind(user.userId)
     .first();
   if (!me || me.user_type !== 1) {
@@ -63,16 +67,28 @@ async function requireAdultUser(db, user) {
   if (ageFrom(me.birth_date) < ADULT_AGE) {
     throw new HttpError(403, "Chat and Discover are 18+", "under_18");
   }
+  if (!me.complete) {
+    throw new HttpError(403, "Complete your profile first", "profile_incomplete");
+  }
   return me;
 }
 
-/** True if this account is a personal account aged 18+. */
+/** True if this account is an 18+ personal account with a complete profile. */
 async function isAdultUser(db, id) {
   const row = await db
-    .prepare("SELECT user_type, birth_date FROM login_data WHERE id = ?")
+    .prepare(
+      `SELECT ld.user_type, ld.birth_date, ${COMPLETE_PROFILE_SQL("up")} AS complete
+       FROM login_data ld LEFT JOIN user_profile up ON up.id = ld.id WHERE ld.id = ?`,
+    )
     .bind(id)
     .first();
-  return !!row && row.user_type === 1 && !!row.birth_date && ageFrom(row.birth_date) >= ADULT_AGE;
+  return (
+    !!row &&
+    row.user_type === 1 &&
+    !!row.birth_date &&
+    ageFrom(row.birth_date) >= ADULT_AGE &&
+    !!row.complete
+  );
 }
 
 /**
@@ -280,7 +296,10 @@ export async function handleSocial({ request, env, ctx, user, method, route, sea
   if (route("GET", /^\/api\/me\/social$/)) {
     requireUser(user);
     const me = await db
-      .prepare("SELECT user_type, birth_date FROM login_data WHERE id = ?")
+      .prepare(
+        `SELECT ld.user_type, ld.birth_date, ${COMPLETE_PROFILE_SQL("up")} AS complete
+         FROM login_data ld LEFT JOIN user_profile up ON up.id = ld.id WHERE ld.id = ?`,
+      )
       .bind(user.userId)
       .first();
     const isUser = me?.user_type === 1;
@@ -288,8 +307,31 @@ export async function handleSocial({ request, env, ctx, user, method, route, sea
       is_user: isUser,
       has_birth_date: !!me?.birth_date,
       is_adult: isUser && !!me?.birth_date && ageFrom(me.birth_date) >= ADULT_AGE,
+      profile_complete: !!me?.complete,
       chat_hours: CHAT_HOURS,
     });
+  }
+
+  // GET /api/chats/unread  – For the Chat tab badge: unread messages + waiting requests.
+  // Answers zeros (instead of an error) for accounts that can't use chat.
+  if (route("GET", /^\/api\/chats\/unread$/)) {
+    requireUser(user);
+    if (!(await isAdultUser(db, user.userId))) return json({ messages: 0, requests: 0 });
+    const counts = await db
+      .prepare(
+        `SELECT
+           (SELECT COUNT(*) FROM messages m
+              JOIN chats c ON c.id = m.chat_id
+            WHERE (c.user_a = ? OR c.user_b = ?) AND c.expires_at > ?
+              AND m.sender_id != ?
+              AND m.id > COALESCE((SELECT last_read_id FROM chat_reads
+                                   WHERE chat_id = c.id AND user_id = ?), 0)) AS messages,
+           (SELECT COUNT(*) FROM chat_requests r
+            WHERE r.to_id = ? AND r.status = 'pending' AND ${NOT_BLOCKED_SQL("r.from_id")}) AS requests`,
+      )
+      .bind(user.userId, user.userId, nowIso(), user.userId, user.userId, user.userId, user.userId, user.userId)
+      .first();
+    return json(counts);
   }
 
   // PUT /api/me/birth-date  – One-time: accounts made before sign-up asked for it
@@ -340,6 +382,7 @@ export async function handleSocial({ request, env, ctx, user, method, route, sea
            AND ld.birth_date IS NOT NULL AND ld.birth_date <= ?
            AND up.username IS NOT NULL
            AND up.is_hidden = 0
+           AND ${COMPLETE_PROFILE_SQL("up")}
            AND ${NOT_BLOCKED_SQL("up.id")}
            -- not already liked by me (waiting), and not passed in the last week
            AND up.id NOT IN (SELECT target_id FROM swipes

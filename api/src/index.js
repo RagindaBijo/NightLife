@@ -1,8 +1,10 @@
 import {
   HttpError,
   IMAGE_DOMAIN,
+  COMPLETE_PROFILE_SQL,
   NOT_BLOCKED_SQL,
   ageFrom,
+  isProfileComplete,
   isBlockedEitherWay,
   json,
   limitText,
@@ -175,20 +177,14 @@ function timingSafeEqual(a, b) {
 }
 
 /**
- * Checks a password against the stored value.
- * Legacy plain-text values are still accepted so existing accounts can log in;
- * they are re-hashed on successful login.
+ * Checks a password against its stored PBKDF2 hash.
+ * (Old plain-text passwords are no longer accepted – every account is hashed.)
  * @param {string} password
  * @param {string} stored
  * @returns {Promise<boolean>}
  */
 async function verifyPassword(password, stored) {
-  if (typeof stored !== "string") return false;
-
-  if (!stored.startsWith("pbkdf2$")) {
-    const encoder = new TextEncoder();
-    return timingSafeEqual(encoder.encode(password), encoder.encode(stored));
-  }
+  if (typeof stored !== "string" || !stored.startsWith("pbkdf2$")) return false;
 
   const [, iterations, saltB64, hashB64] = stored.split("$");
   const expected = base64ToBytes(hashB64);
@@ -225,7 +221,7 @@ function passwordProblems(password) {
 const MIN_AGE = 13; // the app is 13+ (Discover and chat will be 18+)
 
 // What people can report, and why (the app shows a translated label for each)
-const REPORT_REASONS = ["fake_account", "harassment", "sexual_content", "other"];
+const REPORT_REASONS = ["fake_account", "sexual_content", "other"];
 const REPORT_TARGETS = ["user", "post", "venue"];
 
 /** True if a user or venue already uses this username (any letter case). */
@@ -701,16 +697,6 @@ export default {
           return json({ error: "Invalid credentials" }, 401);
         }
 
-        // Upgrade legacy plain-text passwords to a hash
-        if (!account.password.startsWith("pbkdf2$")) {
-          const passwordHash = await hashPassword(password);
-          await env.DB.prepare(
-            "UPDATE login_data SET password = ?, update_date = ? WHERE id = ?",
-          )
-            .bind(passwordHash, new Date().toISOString(), account.id)
-            .run();
-        }
-
         const token = await generateToken(
           account.id,
           account.user_type,
@@ -818,6 +804,10 @@ export default {
           .first();
 
         if (!profile) return json({ error: "Not found" }, 404);
+        // Until photo, names and username are set, nobody else can see the profile
+        if (id !== user.userId && !isProfileComplete(profile)) {
+          return json({ error: "Not found" }, 404);
+        }
 
         // Someone who blocked you looks like they don't exist
         const block = await env.DB.prepare(
@@ -864,6 +854,7 @@ export default {
           result.interested_ids = interests.results.map((row) => row.event_id);
           result.ticket_ids = splitList(ticket_ids);
           result.is_hidden = !!is_hidden;
+          result.profile_complete = isProfileComplete(profile);
         } else {
           Object.assign(result, await chatStatusFor(env.DB, user.userId, id));
         }
@@ -1051,6 +1042,7 @@ export default {
            WHERE up.id != ?
              AND up.username IS NOT NULL
              AND up.is_hidden = 0
+             AND ${COMPLETE_PROFILE_SQL("up")}
              AND ${NOT_BLOCKED_SQL("up.id")}
              AND (up.username LIKE ? ESCAPE '\\'
                   OR up.first_name LIKE ? ESCAPE '\\'
@@ -1194,6 +1186,7 @@ export default {
            LEFT JOIN venue_profile vp ON vp.id = f.${personColumn}
            WHERE f.${matchColumn} = ?
              AND ${NOT_BLOCKED_SQL(`f.${personColumn}`)}
+             AND (vp.id IS NOT NULL OR ${COMPLETE_PROFILE_SQL("up")})
            ORDER BY f.create_date DESC, f.rowid DESC
            LIMIT 500`,
         )
@@ -1796,6 +1789,7 @@ export default {
           LEFT JOIN user_profile up ON p.user_id = up.id
           WHERE (? IS NULL OR p.user_id = ?)
             AND ${NOT_BLOCKED_SQL("p.user_id")}
+            AND (p.user_id IN (SELECT id FROM venue_profile) OR ${COMPLETE_PROFILE_SQL("up")})
           ORDER BY p.create_date DESC
         `,
         )
@@ -1838,6 +1832,18 @@ export default {
             { error: "Unauthorized: Cannot create post for another user" },
             403,
           );
+        }
+
+        // Personal accounts need photo, names and username before posting
+        if (user.userType === 1) {
+          const author = await env.DB.prepare(
+            "SELECT username, first_name, last_name, profile_photo FROM user_profile WHERE id = ?",
+          )
+            .bind(parsedUserId)
+            .first();
+          if (!isProfileComplete(author)) {
+            throw new HttpError(403, "Complete your profile first", "profile_incomplete");
+          }
         }
 
         // The photo must be one of the user's own uploads
