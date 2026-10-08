@@ -22,7 +22,7 @@ import { makeStyles, useTheme } from "../../../../lib/theme-context";
 const EventCard = memo(function EventCard({ event, showInterest, onPress }) {
   const { colors: COLORS } = useTheme();
   const styles = useStyles();
-  useI18n();
+  const { t } = useI18n();
   const when = parseEventTime(event.time);
 
   return (
@@ -75,6 +75,12 @@ const EventCard = memo(function EventCard({ event, showInterest, onPress }) {
             {formatEventTime(event.time)}
           </Text>
         </View>
+        {event.goingCount > 0 && (
+          <View style={styles.infoRow}>
+            <MaterialIcons name="people" size={16} color={COLORS.accent} />
+            <Text style={styles.infoText}>{t("event.goingCount", { count: event.goingCount })}</Text>
+          </View>
+        )}
       </View>
     </Pressable>
   );
@@ -120,6 +126,7 @@ export default function Events() {
               venueName: await venueName(event.venue_id),
               time: eventStart(event) || t("event.noTime"),
               image: event.photo_id || null,
+              goingCount: event.going_count ?? 0,
             })),
           );
 

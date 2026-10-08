@@ -60,7 +60,6 @@ Venues already spend money on Instagram ads, promoters and flyers. NightLife has
 | | Sponsored posts / venues in feed | Shown | Hidden |
 | | Profile badge | ❌ | ✅ |
 | | **Incognito** (view profiles unseen) | ❌ | ✅ |
-| | **See who viewed / liked your profile** | Count only | Full list |
 | Chat | Sending messages in existing chats | ✅ Unlimited | ✅ Unlimited |
 | | Starting **new** chats | 5 per day | Unlimited |
 | | Chat lifetime | **24 hours** | **48 hours** |
@@ -101,8 +100,7 @@ Show the upgrade screen **only when a user hits a limit**, never as a pop-up on 
 2. Starting a 6th new chat in a day.
 3. A chat about to expire ("This chat disappears in 2h. Keep it with Plus").
 4. Tapping the "142 going" count on an event.
-5. Tapping "12 people viewed your profile".
-6. Seeing a perk icon on a partner venue.
+5. Seeing a perk icon on a partner venue.
 
 Each prompt shows the one benefit the user was trying to use, plus the price and the trial.
 
@@ -270,7 +268,7 @@ Only add these once there's real traffic, and keep them clearly labelled "Sponso
 | Real event date/time (not free text) | "Events tonight", tickets, venue stats | Medium (data change) |
 | Structured opening hours | "Open now" filter | Medium (data change) |
 | Push notifications (tokens table, Expo push) | Chat, venue notifications | Medium |
-| "Who's going" list + profile views tracking | Plus | Small–medium |
+| "Who's going" list | Plus | Small |
 | Venue stats (count views, interested, favorites per day) | Venue Pro | Medium |
 | Perks + rotating QR redemption + venue scanner | Plus, Tourist Pass, venues | Medium–large |
 | Verified badge + claim-your-venue flow | Venue Pro, trust | Small–medium |

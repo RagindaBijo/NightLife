@@ -135,6 +135,7 @@ export default function VenueDetail() {
               title: event.title || t("event.numbered", { number: index + 1 }),
               time: eventStart(event) || "",
               image: event.photo_id || null,
+              goingCount: event.going_count ?? 0,
             })),
           );
           setEventsError(null);
@@ -298,6 +299,12 @@ export default function VenueDetail() {
                 <View style={styles.eventMeta}>
                   <MaterialIcons name="schedule" size={14} color={COLORS.accent} />
                   <Text style={styles.eventTime}>{formatEventTime(event.time)}</Text>
+                </View>
+              )}
+              {event.goingCount > 0 && (
+                <View style={styles.eventMeta}>
+                  <MaterialIcons name="people" size={14} color={COLORS.accent} />
+                  <Text style={styles.eventTime}>{t("event.goingCount", { count: event.goingCount })}</Text>
                 </View>
               )}
             </View>

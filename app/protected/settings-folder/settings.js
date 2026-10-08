@@ -10,6 +10,7 @@ import {
   Pressable,
   ScrollView,
   StyleSheet,
+  Switch,
   Text,
   View,
 } from "react-native";
@@ -234,6 +235,8 @@ export default function Settings() {
   const [email, setEmail] = useState(null);
   const [helpOpen, setHelpOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [hidden, setHidden] = useState(null); // personal accounts: hidden from Discover / search
+  const [hiddenSaving, setHiddenSaving] = useState(false);
 
   useEffect(() => {
     navigation.setOptions({ headerShown: false });
@@ -246,6 +249,29 @@ export default function Settings() {
       .then((record) => record && setEmail(record.email))
       .catch((err) => console.warn("Couldn't load account email:", err.message));
   }, []);
+
+  // Whether the profile is hidden (personal accounts only)
+  useEffect(() => {
+    if (isVenue) return;
+    getSession()
+      .then((session) => (session ? api(`/api/user/${session.userId}`) : null))
+      .then((profile) => profile && setHidden(!!profile.is_hidden))
+      .catch((err) => console.warn("Couldn't load privacy setting:", err.message));
+  }, [isVenue]);
+
+  const toggleHidden = async (value) => {
+    setHidden(value);
+    setHiddenSaving(true);
+    try {
+      const session = await getSession();
+      await api(`/api/user/${session.userId}`, { method: "PUT", body: { is_hidden: value } });
+    } catch (err) {
+      setHidden(!value);
+      Alert.alert(t("common.saveError"), err.message);
+    } finally {
+      setHiddenSaving(false);
+    }
+  };
 
   const signOut = () =>
     Alert.alert(t("settings.signOutTitle"), t("settings.signOutMessage"), [
@@ -372,6 +398,38 @@ export default function Settings() {
           <Row icon="notifications-none" label={t("settings.notifications")} badge={t("settings.soon")} />
           <Row icon="lock-outline" label={t("settings.passwordSecurity")} badge={t("settings.soon")} last />
         </Section>
+
+        {!isVenue && hidden !== null && (
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>{t("settings.privacy")}</Text>
+            <View style={[styles.sectionCard, styles.privacyCard]}>
+              <View style={[styles.rowIcon, hidden && styles.rowIconActive]}>
+                <MaterialIcons
+                  name={hidden ? "visibility-off" : "visibility"}
+                  size={20}
+                  color={hidden ? COLORS.onAccent : COLORS.accent}
+                />
+              </View>
+              <View style={styles.privacyText}>
+                <Text style={styles.rowLabel}>{t("settings.hideProfile")}</Text>
+                <Text style={styles.privacyHint}>
+                  {hidden ? t("settings.hideProfileOn") : t("settings.hideProfileOff")}
+                </Text>
+              </View>
+              {hiddenSaving ? (
+                <ActivityIndicator color={COLORS.accent} />
+              ) : (
+                <Switch
+                  value={hidden}
+                  onValueChange={toggleHidden}
+                  trackColor={{ false: COLORS.border, true: COLORS.accent }}
+                  thumbColor="#FFFFFF"
+                  accessibilityLabel={t("settings.hideProfile")}
+                />
+              )}
+            </View>
+          </View>
+        )}
 
         <Section title={t("settings.support")}>
           <Row icon="help-outline" label={t("settings.help")} onPress={() => setHelpOpen(true)} />
@@ -550,6 +608,25 @@ const useStyles = makeStyles((COLORS) => ({
   languageLabelActive: {
     color: COLORS.accent,
     fontWeight: "700",
+  },
+  privacyCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    paddingVertical: 14,
+    paddingHorizontal: 14,
+  },
+  privacyText: {
+    flex: 1,
+    gap: 3,
+  },
+  privacyHint: {
+    color: COLORS.textSecondary,
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  rowIconActive: {
+    backgroundColor: COLORS.accent,
   },
   sectionCard: {
     backgroundColor: COLORS.surface,

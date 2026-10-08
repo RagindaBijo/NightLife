@@ -466,6 +466,7 @@ export default function VenueProfile() {
             photo_ids: data.photo_ids ?? [], // full URLs
             types: data.types ?? [],
             public_status: data.public_status || 0,
+            stats: data.stats ?? null, // { views_total, views_30d, favorites }
           });
           setLoadError(null);
         })
@@ -491,6 +492,7 @@ export default function VenueProfile() {
               time: eventStart(event) || "",
               ended: !!event.starts_at && new Date(event.starts_at).getTime() < upcomingCutoffMs(),
               image: event.photo_id || null,
+              goingCount: event.going_count ?? 0,
             })),
           ),
         (err) => {
@@ -840,6 +842,7 @@ export default function VenueProfile() {
                 <Text style={styles.eventTime}>
                   {formatEventTime(event.time)}
                   {event.ended ? ` · ${t("event.ended")}` : ""}
+                  {` · ${t("event.goingCount", { count: event.goingCount })}`}
                 </Text>
               )}
               <Text style={styles.eventEditHint}>{t("venueProfile.tapToEdit")}</Text>
@@ -1036,6 +1039,31 @@ export default function VenueProfile() {
               </View>
             )}
           </View>
+
+          {/* Totals: who looked at the venue and who saved it */}
+          {!!venue.stats && (
+            <View style={styles.card}>
+              <View style={styles.cardHeader}>
+                <View style={styles.cardIcon}>
+                  <MaterialIcons name="insights" size={18} color={COLORS.accent} />
+                </View>
+                <Text style={styles.cardTitle}>{t("venueProfile.statsTitle")}</Text>
+              </View>
+              <View style={styles.statsRow}>
+                {[
+                  { value: venue.stats.views_30d, label: t("venueProfile.statsViews30") },
+                  { value: venue.stats.views_total, label: t("venueProfile.statsViewsTotal") },
+                  { value: venue.stats.favorites, label: t("venueProfile.statsFavorites") },
+                ].map((item) => (
+                  <View key={item.label} style={styles.statBox}>
+                    <Text style={styles.statValue}>{item.value ?? 0}</Text>
+                    <Text style={styles.statLabel}>{item.label}</Text>
+                  </View>
+                ))}
+              </View>
+              <Text style={styles.cardHint}>{t("venueProfile.statsHint")}</Text>
+            </View>
+          )}
 
           <SegmentedTabs
             tabs={SECTIONS.map((item) => ({ key: item.key, label: t(item.labelKey) }))}
@@ -1329,6 +1357,29 @@ const useStyles = makeStyles((COLORS) => ({
     color: COLORS.textSecondary,
     fontSize: 13,
     fontWeight: "600",
+  },
+  statsRow: {
+    flexDirection: "row",
+    gap: 8,
+    marginTop: 4,
+  },
+  statBox: {
+    flex: 1,
+    alignItems: "center",
+    paddingVertical: 12,
+    borderRadius: 14,
+    backgroundColor: COLORS.surfacePressed,
+  },
+  statValue: {
+    color: COLORS.text,
+    fontSize: 22,
+    fontWeight: "800",
+  },
+  statLabel: {
+    color: COLORS.textSecondary,
+    fontSize: 12,
+    textAlign: "center",
+    marginTop: 2,
   },
   checklistItem: {
     flexDirection: "row",

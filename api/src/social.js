@@ -339,6 +339,7 @@ export async function handleSocial({ request, env, ctx, user, method, route, sea
            AND ld.user_type = 1
            AND ld.birth_date IS NOT NULL AND ld.birth_date <= ?
            AND up.username IS NOT NULL
+           AND up.is_hidden = 0
            AND ${NOT_BLOCKED_SQL("up.id")}
            -- not already liked by me (waiting), and not passed in the last week
            AND up.id NOT IN (SELECT target_id FROM swipes

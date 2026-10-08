@@ -38,6 +38,7 @@ export default function EventDetail() {
   const [userType, setUserType] = useState(null);
   const [section, setSection] = useState("details");
   const [galleryVisible, setGalleryVisible] = useState(false);
+  const isInterested = interests.useValue(event?.id);
 
   useEffect(() => {
     navigation.setOptions({ headerShown: false });
@@ -57,6 +58,8 @@ export default function EventDetail() {
             venueId: eventData.venue_id,
             // photo_id is a full URL from the API
             images: eventData.photo_id ? [eventData.photo_id] : [],
+            goingCount: eventData.going_count ?? 0,
+            wasInterested: !!eventData.is_interested,
           });
           setError(null);
 
@@ -180,6 +183,22 @@ export default function EventDetail() {
               <View style={styles.infoText}>
                 <Text style={styles.infoLabel}>{t("event.when")}</Text>
                 <Text style={styles.infoValue}>{formatEventTime(event.time)}</Text>
+              </View>
+            </View>
+            <View style={[styles.infoRow, styles.infoRowDivider]}>
+              <View style={styles.infoIcon}>
+                <MaterialIcons name="people" size={20} color={COLORS.accent} />
+              </View>
+              <View style={styles.infoText}>
+                <Text style={styles.infoLabel}>{t("event.going")}</Text>
+                <Text style={styles.infoValue}>
+                  {t("event.goingCount", {
+                    count: Math.max(
+                      0,
+                      event.goingCount - (event.wasInterested ? 1 : 0) + (isInterested ? 1 : 0),
+                    ),
+                  })}
+                </Text>
               </View>
             </View>
           </View>

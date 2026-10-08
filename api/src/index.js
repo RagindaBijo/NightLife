@@ -225,17 +225,7 @@ function passwordProblems(password) {
 const MIN_AGE = 13; // the app is 13+ (Discover and chat will be 18+)
 
 // What people can report, and why (the app shows a translated label for each)
-const REPORT_REASONS = [
-  "spam",
-  "fake_account",
-  "harassment",
-  "hate_speech",
-  "sexual_content",
-  "violence",
-  "scam",
-  "underage",
-  "other",
-];
+const REPORT_REASONS = ["fake_account", "harassment", "sexual_content", "other"];
 const REPORT_TARGETS = ["user", "post", "venue"];
 
 /** True if a user or venue already uses this username (any letter case). */
@@ -821,7 +811,7 @@ export default {
         // Explicit columns – never return email or password
         const profile = await env.DB.prepare(
           `SELECT id, username, user_type, first_name, last_name, profile_photo,
-                  ticket_ids, bio_text, create_date, update_date
+                  ticket_ids, bio_text, is_hidden, create_date, update_date
            FROM user_profile WHERE id = ?`,
         )
           .bind(id)
@@ -849,7 +839,7 @@ export default {
           .bind(id, id, id, user.userId, id)
           .first();
 
-        const { ticket_ids, ...publicProfile } = profile;
+        const { ticket_ids, is_hidden, ...publicProfile } = profile;
         const result = {
           ...publicProfile,
           profile_photo: toImageUrl(profile.profile_photo),
@@ -873,6 +863,7 @@ export default {
           result.favorite_ids = favorites.results.map((row) => row.venue_id);
           result.interested_ids = interests.results.map((row) => row.event_id);
           result.ticket_ids = splitList(ticket_ids);
+          result.is_hidden = !!is_hidden;
         } else {
           Object.assign(result, await chatStatusFor(env.DB, user.userId, id));
         }
@@ -928,6 +919,14 @@ export default {
         if ("bio_text" in body) {
           updates.push("bio_text = ?");
           values.push(limitText(body.bio_text, 300, "bio_text"));
+        }
+        // Hidden = not shown in Discover or people search
+        if ("is_hidden" in body) {
+          if (typeof body.is_hidden !== "boolean") {
+            return json({ error: "is_hidden must be true or false" }, 400);
+          }
+          updates.push("is_hidden = ?");
+          values.push(body.is_hidden ? 1 : 0);
         }
 
         if (updates.length === 0)
@@ -985,6 +984,9 @@ export default {
           ).bind(userId, userId),
           env.DB.prepare(
             "DELETE FROM venue_favorites WHERE user_id = ? OR venue_id = ?",
+          ).bind(userId, userId),
+          env.DB.prepare(
+            "DELETE FROM venue_views WHERE viewer_id = ? OR venue_id = ?",
           ).bind(userId, userId),
           env.DB.prepare(
             "DELETE FROM follows WHERE follower_id = ? OR following_id = ?",
@@ -1048,6 +1050,7 @@ export default {
            FROM user_profile up
            WHERE up.id != ?
              AND up.username IS NOT NULL
+             AND up.is_hidden = 0
              AND ${NOT_BLOCKED_SQL("up.id")}
              AND (up.username LIKE ? ESCAPE '\\'
                   OR up.first_name LIKE ? ESCAPE '\\'
@@ -1289,7 +1292,29 @@ export default {
           return json({ error: "Not found" }, 404);
         }
 
-        return json({ ...formatVenue(venue), my_rating: venue.my_rating ?? null });
+        const result = { ...formatVenue(venue), my_rating: venue.my_rating ?? null };
+
+        if (venue.id === user.userId) {
+          // The venue's own totals (shown on its profile)
+          result.stats = await env.DB.prepare(
+            `SELECT
+               (SELECT COUNT(*) FROM venue_views WHERE venue_id = ?) AS views_total,
+               (SELECT COUNT(*) FROM venue_views WHERE venue_id = ? AND day >= ?) AS views_30d,
+               (SELECT COUNT(*) FROM venue_favorites WHERE venue_id = ?) AS favorites`,
+          )
+            .bind(id, id, new Date(Date.now() - 29 * 86400000).toISOString().slice(0, 10), id)
+            .first();
+        } else {
+          // One view per person per day; recorded after the response is sent
+          ctx.waitUntil(
+            env.DB.prepare("INSERT OR IGNORE INTO venue_views (venue_id, viewer_id, day) VALUES (?, ?, ?)")
+              .bind(id, user.userId, new Date().toISOString().slice(0, 10))
+              .run()
+              .catch((err) => console.error("Venue view not recorded:", err)),
+          );
+        }
+
+        return json(result);
       }
 
       // PUT /api/venue/:id  – Update own venue profile (venues only)
@@ -1490,7 +1515,8 @@ export default {
       const EVENT_SELECT = `
         SELECT e.*,
                EXISTS (SELECT 1 FROM event_interests i
-                       WHERE i.event_id = e.id AND i.user_id = ?) AS is_interested
+                       WHERE i.event_id = e.id AND i.user_id = ?) AS is_interested,
+               (SELECT COUNT(*) FROM event_interests g WHERE g.event_id = e.id) AS going_count
         FROM events e
         JOIN venue_profile v ON v.id = e.venue_id
         WHERE (v.public_status = 1 OR v.id = ?)`;
