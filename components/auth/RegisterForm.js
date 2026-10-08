@@ -7,8 +7,12 @@ import { api, saveSession } from "../../lib/api";
 import { useI18n } from "../../lib/i18n";
 import {
   EMAIL_RE,
+  MIN_AGE,
   USERNAME_RE,
+  ageFromIso,
+  birthDateToIso,
   isStrongPassword,
+  maskBirthDate,
   normalizeEmail,
 } from "../../lib/validation";
 import AuthInput from "./AuthInput";
@@ -27,6 +31,8 @@ const SERVER_ERRORS = {
   weak_password: { field: "password", key: "auth.weakPassword" },
   terms_required: { field: "general", key: "auth.termsRequired" },
   missing_fields: { field: "general", key: "auth.allFieldsRequired" },
+  invalid_birth_date: { field: "birthDate", key: "auth.birthDateInvalid" },
+  too_young: { field: "birthDate", key: "auth.tooYoung" },
 };
 
 /**
@@ -40,6 +46,7 @@ export default function RegisterForm({ accountType }) {
   const usernameRef = useRef(null);
   const firstNameRef = useRef(null);
   const lastNameRef = useRef(null);
+  const birthDateRef = useRef(null);
   const emailRef = useRef(null);
   const passwordRef = useRef(null);
   const confirmRef = useRef(null);
@@ -49,6 +56,7 @@ export default function RegisterForm({ accountType }) {
     username: "",
     firstName: "",
     lastName: "",
+    birthDate: "",
     email: "",
     password: "",
     confirm: "",
@@ -116,12 +124,29 @@ export default function RegisterForm({ accountType }) {
       ? t("auth.passwordsDontMatch")
       : null;
 
+  // Date of birth (personal accounts): DD.MM.YYYY, at least MIN_AGE years old
+  const birthIso = birthDateToIso(form.birthDate);
+  const birthComplete = form.birthDate.length === 10;
+  const tooYoung = birthIso !== null && ageFromIso(birthIso) < MIN_AGE;
+  const birthInvalid = birthComplete && (birthIso === null || ageFromIso(birthIso) > 120);
+  const birthDateError =
+    serverErrors.birthDate ??
+    (birthInvalid
+      ? t("auth.birthDateInvalid")
+      : tooYoung
+        ? t("auth.tooYoung", { age: MIN_AGE })
+        : touched.birthDate && form.birthDate && !birthComplete
+          ? t("auth.birthDateInvalid")
+          : null);
+  const birthDateValid = isVenue || (birthIso !== null && !tooYoung && !birthInvalid);
+
   const namesFilled = isVenue
     ? form.title.trim().length > 0
     : form.firstName.trim().length > 0 && form.lastName.trim().length > 0;
 
   const canSubmit =
     namesFilled &&
+    birthDateValid &&
     usernameValid &&
     availability.value === username &&
     availability.available !== false &&
@@ -149,7 +174,11 @@ export default function RegisterForm({ accountType }) {
           accepted_terms: true,
           ...(isVenue
             ? { title: form.title.trim() }
-            : { first_name: form.firstName.trim(), last_name: form.lastName.trim() }),
+            : {
+                first_name: form.firstName.trim(),
+                last_name: form.lastName.trim(),
+                birth_date: birthIso,
+              }),
         },
       });
       await saveSession(data);
@@ -158,7 +187,7 @@ export default function RegisterForm({ accountType }) {
       const known = SERVER_ERRORS[err.code];
       setServerErrors(
         known
-          ? { [known.field]: t(known.key) }
+          ? { [known.field]: t(known.key, { age: MIN_AGE }) }
           : {
               general:
                 err.status === 0 ? t("auth.networkError") : err.message || t("auth.registrationFailed"),
@@ -241,9 +270,25 @@ export default function RegisterForm({ accountType }) {
               autoComplete="family-name"
               maxLength={50}
               returnKeyType="next"
-              onSubmitEditing={() => emailRef.current?.focus()}
+              onSubmitEditing={() => birthDateRef.current?.focus()}
             />
           </View>
+        )}
+        {!isVenue && (
+          <AuthInput
+            ref={birthDateRef}
+            icon="cake"
+            placeholder={t("auth.birthDatePlaceholder")}
+            value={form.birthDate}
+            onChangeText={(value) => setField("birthDate")(maskBirthDate(value))}
+            onBlur={touch("birthDate")}
+            keyboardType="number-pad"
+            maxLength={10}
+            status={birthDateError ? "error" : birthDateValid ? "ok" : undefined}
+            message={birthDateError ?? t("auth.birthDateHint")}
+            returnKeyType="next"
+            onSubmitEditing={() => emailRef.current?.focus()}
+          />
         )}
       </View>
 

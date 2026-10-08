@@ -37,6 +37,8 @@ function ThemedStack() {
         {/* Readable before signing up (linked from the Terms checkbox) */}
         <Stack.Screen name="terms" options={{ title: t('settings.termsOfUse') }} />
         <Stack.Screen name="privacy" options={{ title: t('settings.privacyPolicy') }} />
+        <Stack.Screen name="user/[id]" options={{ headerShown: false }} />
+        <Stack.Screen name="user/posts" options={{ headerShown: false }} />
       </Stack>
     </ThemeProvider>
   );

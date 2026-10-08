@@ -40,9 +40,10 @@ export function timeAgo(value) {
 
 /**
  * A post: author, photo (double-tap to like), like button, caption.
- * Pass onOptions to show the ⋯ menu (e.g. for the author's own posts).
+ * Pass onOptions to show the ⋯ menu (e.g. for the author's own posts) and
+ * onAuthorPress to make the author tappable (opens their profile).
  */
-const PostCard = memo(function PostCard({ post, onToggleLike, onOptions }) {
+const PostCard = memo(function PostCard({ post, onToggleLike, onOptions, onAuthorPress }) {
   const { colors: COLORS, gradients: GRADIENTS } = useTheme();
   const { t } = useI18n();
   const styles = useStyles();
@@ -88,6 +89,13 @@ const PostCard = memo(function PostCard({ post, onToggleLike, onOptions }) {
     <View style={styles.card}>
       {/* Author */}
       <View style={styles.header}>
+        <Pressable
+          onPress={onAuthorPress ? () => onAuthorPress(post) : undefined}
+          disabled={!onAuthorPress}
+          style={({ pressed }) => [styles.authorPress, pressed && styles.authorPressed]}
+          accessibilityRole={onAuthorPress ? "button" : undefined}
+          accessibilityLabel={onAuthorPress ? t("post.openProfile", { name }) : undefined}
+        >
         <LinearGradient colors={GRADIENTS.brand} style={styles.avatarRing}>
           <Image source={{ uri: post.user_image }} style={styles.avatar} contentFit="cover" />
         </LinearGradient>
@@ -104,6 +112,7 @@ const PostCard = memo(function PostCard({ post, onToggleLike, onOptions }) {
             </View>
           )}
         </View>
+        </Pressable>
         <Text style={styles.time}>{timeAgo(post.date)}</Text>
         {onOptions && (
           <Pressable
@@ -190,6 +199,14 @@ const useStyles = makeStyles((COLORS) => ({
   header: {
     flexDirection: "row",
     alignItems: "center",
+  },
+  authorPress: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+  },
+  authorPressed: {
+    opacity: 0.6,
   },
   avatarRing: {
     width: 40,

@@ -15,7 +15,7 @@ import ImageGallery from "../../../../components/ImageGallery";
 import InterestCheck from "../../../../components/InterestCheck";
 import SegmentedTabs from "../../../../components/SegmentedTabs";
 import { api, getSession } from "../../../../lib/api";
-import { formatEventTime, parseEventTime } from "../../../../lib/format";
+import { eventStart, formatEventTime, parseEventTime } from "../../../../lib/format";
 import { interests } from "../../../../lib/toggles";
 import { useI18n } from "../../../../lib/i18n";
 import { makeStyles, useTheme } from "../../../../lib/theme-context";
@@ -53,7 +53,7 @@ export default function EventDetail() {
             id: String(eventData.id ?? eventId),
             title: eventData.title || t("event.untitled"),
             about: eventData.about || t("event.noDescription"),
-            time: eventData.time || t("event.noTime"),
+            time: eventStart(eventData) || t("event.noTime"),
             venueId: eventData.venue_id,
             // photo_id is a full URL from the API
             images: eventData.photo_id ? [eventData.photo_id] : [],

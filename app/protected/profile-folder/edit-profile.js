@@ -385,6 +385,7 @@ export default function EditProfile() {
               value={form.first_name}
               onChangeText={setField("first_name")}
               placeholder={t("editProfile.firstName")}
+              maxLength={50}
               autoCapitalize="words"
               returnKeyType="next"
             />
@@ -395,6 +396,7 @@ export default function EditProfile() {
               value={form.last_name}
               onChangeText={setField("last_name")}
               placeholder={t("editProfile.lastName")}
+              maxLength={50}
               autoCapitalize="words"
               returnKeyType="next"
             />
@@ -415,6 +417,7 @@ export default function EditProfile() {
           value={form.bio_text}
           onChangeText={setField("bio_text")}
           placeholder={t("editProfile.bioPlaceholder")}
+          maxLength={300}
           multiline
         />
       </ScrollView>

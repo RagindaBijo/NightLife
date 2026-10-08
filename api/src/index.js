@@ -1,3 +1,30 @@
+import {
+  HttpError,
+  IMAGE_DOMAIN,
+  NOT_BLOCKED_SQL,
+  ageFrom,
+  isBlockedEitherWay,
+  json,
+  limitText,
+  parseId,
+  parseStartsAt,
+  upcomingCutoff,
+  readJson,
+  requireUser,
+  toImageUrl,
+} from "./shared.js";
+import {
+  ChatRoom,
+  chatStatusFor,
+  cleanUpExpiredChats,
+  deleteSocialDataStatements,
+  endConnectionStatements,
+  handleSocial,
+} from "./social.js";
+
+// Durable Object class for live chat rooms (bound as CHAT_ROOMS in wrangler.toml)
+export { ChatRoom };
+
 /**
  * Night-Life API – Cloudflare Worker
  * Handles auth (JWT), users, venues, events, posts, and image storage (R2).
@@ -12,10 +39,11 @@
  * Token expires in 7 days.
  * @param {number|string} userId
  * @param {number} userType  – 1 = regular user, 2 = venue
- * @param {string} secret==
+ * @param {string} secret
+ * @param {number} version   – login_data.token_version; raising it revokes older tokens
  * @returns {Promise<string>} JWT string
  */
-async function generateToken(userId, userType, secret) {
+async function generateToken(userId, userType, secret, version = 0) {
   // JWT header
   const header = { alg: "HS256", typ: "JWT" };
 
@@ -23,6 +51,7 @@ async function generateToken(userId, userType, secret) {
   const payload = {
     userId,
     userType,
+    ver: version,
     exp: Math.floor(Date.now() / 1000) + 7 * 24 * 3600, // 7 days
   };
 
@@ -193,6 +222,22 @@ function passwordProblems(password) {
   return problems;
 }
 
+const MIN_AGE = 13; // the app is 13+ (Discover and chat will be 18+)
+
+// What people can report, and why (the app shows a translated label for each)
+const REPORT_REASONS = [
+  "spam",
+  "fake_account",
+  "harassment",
+  "hate_speech",
+  "sexual_content",
+  "violence",
+  "scam",
+  "underage",
+  "other",
+];
+const REPORT_TARGETS = ["user", "post", "venue"];
+
 /** True if a user or venue already uses this username (any letter case). */
 async function isUsernameTaken(db, username, exceptId = null) {
   const row = await db
@@ -224,8 +269,6 @@ async function checkUsername(db, username, exceptId = null) {
 // Image helpers
 // ────────────────────────────────────────────────
 
-const IMAGE_DOMAIN = "https://night-life-api.elevator-rand.workers.dev/images";
-
 // R2 folders that belong to a given user / venue / event
 const userImagePrefix = (userId) => `night-life-images/users/${userId}/`;
 const venueImagePrefix = (userId) => `venues/${userId}/`;
@@ -234,15 +277,6 @@ const eventImagePrefix = (eventId) => `events/${eventId}/`;
 
 function isKeyIn(key, prefix) {
   return typeof key === "string" && key.startsWith(prefix);
-}
-
-/**
- * Stored key → full public URL (the API always returns full URLs).
- * Values that are already URLs (legacy data) are returned unchanged.
- */
-function toImageUrl(key) {
-  if (!key) return null;
-  return /^https?:\/\//.test(key) ? key : `${IMAGE_DOMAIN}/${key}`;
 }
 
 /**
@@ -337,55 +371,6 @@ function formatVenue(venue) {
 }
 
 // ────────────────────────────────────────────────
-// Request / response helpers
-// ────────────────────────────────────────────────
-
-/**
- * JSON response with CORS header.
- */
-function json(data, status = 200) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: {
-      "Content-Type": "application/json",
-      "Access-Control-Allow-Origin": "*",
-    },
-  });
-}
-
-/**
- * Error with an HTTP status; thrown inside routes and turned into a JSON
- * response by the top-level handler.
- */
-class HttpError extends Error {
-  // `code` is a stable id the app maps to a translated message
-  constructor(status, message, code) {
-    super(message);
-    this.status = status;
-    this.code = code;
-  }
-}
-
-async function readJson(request) {
-  try {
-    return await request.json();
-  } catch {
-    throw new HttpError(400, "Invalid JSON body");
-  }
-}
-
-function requireUser(user) {
-  if (!user) throw new HttpError(401, "Unauthorized");
-  return user;
-}
-
-function parseId(value) {
-  const id = Number(value);
-  if (!Number.isInteger(id) || id <= 0) throw new HttpError(400, "Invalid id");
-  return id;
-}
-
-// ────────────────────────────────────────────────
 // Main Worker entry point
 // ────────────────────────────────────────────────
 
@@ -419,8 +404,29 @@ export default {
     const token = authHeader?.startsWith("Bearer ")
       ? authHeader.slice(7)
       : null;
-    const user = token ? await verifyToken(token, JWT_SECRET) : null;
-    // `user` is either the decoded payload { userId, userType, exp } or null
+    let user = token ? await verifyToken(token, JWT_SECRET) : null;
+    // `user` is either the decoded payload { userId, userType, ver, exp } or null
+
+    // Revocation: the account must still exist and the token must carry its
+    // current version (raised on password change). Older tokens have no
+    // version and count as 0.
+    if (user) {
+      const account = await env.DB.prepare(
+        "SELECT token_version FROM login_data WHERE id = ?",
+      )
+        .bind(user.userId)
+        .first();
+      if (!account || account.token_version !== (user.ver ?? 0)) user = null;
+    }
+
+    // Rate limiting: too many requests in a minute → 429 "rate_limited".
+    // Skipped if the binding isn't configured (e.g. an older local setup).
+    const clientIp = request.headers.get("CF-Connecting-IP") || "local";
+    const rateLimit = async (limiter, key) => {
+      if (!limiter) return;
+      const { success } = await limiter.limit({ key });
+      if (!success) throw new HttpError(429, "Too many requests, slow down", "rate_limited");
+    };
 
     // Exact route matching: returns the regex match for this method + path, or null
     const route = (routeMethod, pattern) =>
@@ -488,6 +494,7 @@ export default {
       // Query params: ?type=user|venue|event  &eventId=...
       if (route("POST", /^\/api\/upload-image$/)) {
         requireUser(user);
+        await rateLimit(env.WRITE_LIMITER, `write:${user.userId}`);
 
         const formData = await request.formData();
         const files = formData.getAll("file");
@@ -578,6 +585,7 @@ export default {
 
       // GET /api/username-available?username=…  – Live check while signing up
       if (route("GET", /^\/api\/username-available$/)) {
+        await rateLimit(env.SEARCH_LIMITER, `search:${clientIp}`);
         const username = (searchParams.get("username") || "").trim();
         if (!USERNAME_RE.test(username)) {
           return json({ available: false, reason: "invalid_username" });
@@ -588,8 +596,9 @@ export default {
 
       // POST /api/register  – Create account + profile in one step
       // Body: { email, password, user_type, username, accepted_terms,
-      //         first_name, last_name (users) | title (venues) }
+      //         first_name, last_name, birth_date "YYYY-MM-DD" (users) | title (venues) }
       if (route("POST", /^\/api\/register$/)) {
+        await rateLimit(env.AUTH_LIMITER, `auth:${clientIp}`);
         const body = await readJson(request);
         const userType = body.user_type;
         const email = normalizeEmail(body.email);
@@ -614,6 +623,18 @@ export default {
         }
         if (userType === 1 && (!firstName || !lastName)) {
           throw new HttpError(400, "Missing required fields", "missing_fields");
+        }
+        // Personal accounts give their date of birth (needed for 18+ features)
+        let birthDate = null;
+        if (userType === 1) {
+          const age = ageFrom(body.birth_date);
+          if (age === null || age > 120) {
+            throw new HttpError(400, "Invalid date of birth", "invalid_birth_date");
+          }
+          if (age < MIN_AGE) {
+            throw new HttpError(400, `You must be at least ${MIN_AGE}`, "too_young");
+          }
+          birthDate = body.birth_date;
         }
         if (userType === 2 && !title) {
           throw new HttpError(400, "Missing required fields", "missing_fields");
@@ -648,9 +669,9 @@ export default {
         try {
           [inserted] = await env.DB.batch([
             env.DB.prepare(
-              `INSERT INTO login_data (email, password, user_type, create_date, terms_accepted_at)
-               VALUES (?, ?, ?, ?, ?)`,
-            ).bind(email, passwordHash, userType, now, now),
+              `INSERT INTO login_data (email, password, user_type, create_date, terms_accepted_at, birth_date)
+               VALUES (?, ?, ?, ?, ?, ?)`,
+            ).bind(email, passwordHash, userType, now, now, birthDate),
             profileUpdate,
           ]);
         } catch (err) {
@@ -670,6 +691,7 @@ export default {
 
       // POST /api/login  – Authenticate and return JWT
       if (route("POST", /^\/api\/login$/)) {
+        await rateLimit(env.AUTH_LIMITER, `auth:${clientIp}`);
         const body = await readJson(request);
         const email = normalizeEmail(body.email);
         const password = body.password;
@@ -680,7 +702,7 @@ export default {
 
         // Emails are stored lower-case now; lower() also matches older accounts
         const account = await env.DB.prepare(
-          "SELECT id, password, user_type FROM login_data WHERE lower(email) = ?",
+          "SELECT id, password, user_type, token_version FROM login_data WHERE lower(email) = ?",
         )
           .bind(email)
           .first();
@@ -703,6 +725,7 @@ export default {
           account.id,
           account.user_type,
           JWT_SECRET,
+          account.token_version,
         );
 
         return json({ token, userId: account.id, userType: account.user_type });
@@ -726,6 +749,7 @@ export default {
       }
 
       // PUT /api/login/:id  – Update own password / last_active
+      // Body: { password, current_password } or { last_active }
       if ((match = route("PUT", /^\/api\/login\/([^/]+)$/))) {
         requireUser(user);
         const id = parseId(match[1]);
@@ -733,17 +757,28 @@ export default {
         // Only the owner may change their own login record
         if (id !== user.userId) return json({ error: "Forbidden" }, 403);
 
-        const { password, last_active } = await readJson(request);
+        const { password, current_password, last_active } = await readJson(request);
 
         const updates = [];
         const values = [];
 
         if (password) {
+          // A stolen token alone must not be enough to take over the account
+          const account = await env.DB.prepare(
+            "SELECT password FROM login_data WHERE id = ?",
+          )
+            .bind(id)
+            .first();
+          if (!account || !(await verifyPassword(current_password ?? "", account.password))) {
+            throw new HttpError(403, "Current password is wrong", "wrong_password");
+          }
           if (passwordProblems(password).length > 0) {
             throw new HttpError(400, "Password is too weak", "weak_password");
           }
           updates.push("password = ?");
           values.push(await hashPassword(password));
+          // Log out every other device
+          updates.push("token_version = token_version + 1");
         }
         if (last_active) {
           updates.push("last_active = ?");
@@ -761,6 +796,16 @@ export default {
           .bind(...values)
           .run();
 
+        if (password) {
+          // A fresh token so this device stays logged in
+          const { token_version } = await env.DB.prepare(
+            "SELECT token_version FROM login_data WHERE id = ?",
+          )
+            .bind(id)
+            .first();
+          const token = await generateToken(id, user.userType, JWT_SECRET, token_version);
+          return json({ success: true, token });
+        }
         return json({ success: true });
       }
 
@@ -784,6 +829,16 @@ export default {
 
         if (!profile) return json({ error: "Not found" }, 404);
 
+        // Someone who blocked you looks like they don't exist
+        const block = await env.DB.prepare(
+          `SELECT
+             EXISTS (SELECT 1 FROM blocks WHERE blocker_id = ? AND blocked_id = ?) AS blocked_by_me,
+             EXISTS (SELECT 1 FROM blocks WHERE blocker_id = ? AND blocked_id = ?) AS blocked_me`,
+        )
+          .bind(user.userId, id, id, user.userId)
+          .first();
+        if (block.blocked_me) return json({ error: "Not found" }, 404);
+
         const counts = await env.DB.prepare(
           `SELECT
              (SELECT COUNT(*) FROM follows WHERE following_id = ?) AS followers_count,
@@ -802,6 +857,7 @@ export default {
           following_count: counts.following_count,
           posts_count: counts.posts_count,
           is_following: !!counts.is_following,
+          is_blocked: !!block.blocked_by_me,
         };
 
         // Favorites, interests and tickets are private
@@ -817,6 +873,8 @@ export default {
           result.favorite_ids = favorites.results.map((row) => row.venue_id);
           result.interested_ids = interests.results.map((row) => row.event_id);
           result.ticket_ids = splitList(ticket_ids);
+        } else {
+          Object.assign(result, await chatStatusFor(env.DB, user.userId, id));
         }
 
         return json(result);
@@ -829,7 +887,7 @@ export default {
 
         // Must be the owner and a regular user (type 1)
         if (user.userId !== userId || user.userType !== 1) {
-          return json({ error: "Unauthorized" }, 401);
+          return json({ error: "Forbidden" }, 403);
         }
 
         const body = await readJson(request);
@@ -857,11 +915,11 @@ export default {
         }
         if ("first_name" in body) {
           updates.push("first_name = ?");
-          values.push(body.first_name);
+          values.push(limitText(body.first_name, 50, "first_name"));
         }
         if ("last_name" in body) {
           updates.push("last_name = ?");
-          values.push(body.last_name);
+          values.push(limitText(body.last_name, 50, "last_name"));
         }
         if ("ticket_ids" in body) {
           updates.push("ticket_ids = ?");
@@ -869,7 +927,7 @@ export default {
         }
         if ("bio_text" in body) {
           updates.push("bio_text = ?");
-          values.push(body.bio_text);
+          values.push(limitText(body.bio_text, 300, "bio_text"));
         }
 
         if (updates.length === 0)
@@ -937,10 +995,17 @@ export default {
           env.DB.prepare("DELETE FROM venue_types WHERE venue_id = ?").bind(
             userId,
           ),
-          // Feedback is kept, just no longer linked to the account
+          // Feedback and reports are kept, just no longer linked to the account
           env.DB.prepare(
             "UPDATE feedback SET user_id = NULL WHERE user_id = ?",
           ).bind(userId),
+          env.DB.prepare(
+            "UPDATE reports SET reporter_id = NULL WHERE reporter_id = ?",
+          ).bind(userId),
+          env.DB.prepare(
+            "DELETE FROM blocks WHERE blocker_id = ? OR blocked_id = ?",
+          ).bind(userId, userId),
+          ...deleteSocialDataStatements(env.DB, userId),
           env.DB.prepare("DELETE FROM posts WHERE user_id = ?").bind(userId),
           env.DB.prepare("DELETE FROM events WHERE venue_id = ?").bind(userId),
           env.DB.prepare("DELETE FROM user_profile WHERE id = ?").bind(userId),
@@ -966,6 +1031,182 @@ export default {
         return json({ success: true, message: "Account deleted successfully" });
       }
 
+      // GET /api/users/search?q=…  – Find people by username or name (2+ characters)
+      if (route("GET", /^\/api\/users\/search$/)) {
+        requireUser(user);
+        await rateLimit(env.SEARCH_LIMITER, `search:${user.userId}`);
+        const query = (searchParams.get("q") || "").trim().slice(0, 50);
+        if (query.length < 2) return json([]);
+
+        // Escape LIKE wildcards so "%" or "_" are matched literally
+        const like = `%${query.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+        const prefix = `${query.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+        const { results } = await env.DB.prepare(
+          `SELECT up.id, up.username, up.first_name, up.last_name, up.profile_photo,
+                  EXISTS (SELECT 1 FROM follows f
+                          WHERE f.follower_id = ? AND f.following_id = up.id) AS is_following
+           FROM user_profile up
+           WHERE up.id != ?
+             AND up.username IS NOT NULL
+             AND ${NOT_BLOCKED_SQL("up.id")}
+             AND (up.username LIKE ? ESCAPE '\\'
+                  OR up.first_name LIKE ? ESCAPE '\\'
+                  OR up.last_name LIKE ? ESCAPE '\\'
+                  OR (up.first_name || ' ' || up.last_name) LIKE ? ESCAPE '\\')
+           -- Usernames starting with the query first, then alphabetical
+           ORDER BY (up.username LIKE ? ESCAPE '\\') DESC, up.username COLLATE NOCASE
+           LIMIT 20`,
+        )
+          .bind(user.userId, user.userId, user.userId, user.userId, like, like, like, like, prefix)
+          .all();
+
+        return json(
+          results.map((row) => ({
+            ...row,
+            profile_photo: toImageUrl(row.profile_photo),
+            is_following: !!row.is_following,
+          })),
+        );
+      }
+
+      // PUT / DELETE /api/users/:id/block  – Block / unblock someone
+      // Blocking also removes follows in both directions.
+      if ((match = toggleRoute(/^\/api\/users\/([^/]+)\/block$/))) {
+        requireUser(user);
+        const targetId = parseId(match[1]);
+        if (targetId === user.userId) {
+          return json({ error: "You cannot block yourself" }, 400);
+        }
+        const target = await env.DB.prepare("SELECT id FROM login_data WHERE id = ?")
+          .bind(targetId)
+          .first();
+        if (!target) return json({ error: "User not found" }, 404);
+        await rateLimit(env.WRITE_LIMITER, `write:${user.userId}`);
+
+        if (method === "PUT") {
+          await env.DB.batch([
+            env.DB.prepare(
+              "INSERT OR IGNORE INTO blocks (blocker_id, blocked_id) VALUES (?, ?)",
+            ).bind(user.userId, targetId),
+            env.DB.prepare(
+              "DELETE FROM follows WHERE (follower_id = ? AND following_id = ?) OR (follower_id = ? AND following_id = ?)",
+            ).bind(user.userId, targetId, targetId, user.userId),
+            ...endConnectionStatements(env.DB, user.userId, targetId),
+          ]);
+        } else {
+          await env.DB.prepare("DELETE FROM blocks WHERE blocker_id = ? AND blocked_id = ?")
+            .bind(user.userId, targetId)
+            .run();
+        }
+        return json({ is_blocked: method === "PUT" });
+      }
+
+      // GET /api/blocks  – People you have blocked (to unblock them in Settings)
+      if (route("GET", /^\/api\/blocks$/)) {
+        requireUser(user);
+        const { results } = await env.DB.prepare(
+          `SELECT b.blocked_id AS id,
+                  COALESCE(up.username, vp.username) AS username,
+                  up.first_name, up.last_name,
+                  COALESCE(up.profile_photo, NULL) AS profile_photo,
+                  b.create_date
+           FROM blocks b
+           LEFT JOIN user_profile up ON up.id = b.blocked_id
+           LEFT JOIN venue_profile vp ON vp.id = b.blocked_id
+           WHERE b.blocker_id = ?
+           ORDER BY b.create_date DESC`,
+        )
+          .bind(user.userId)
+          .all();
+        return json(results.map((row) => ({ ...row, profile_photo: toImageUrl(row.profile_photo) })));
+      }
+
+      // POST /api/reports  – Report a user, post or venue
+      // Body: { target_type: "user"|"post"|"venue", target_id, reason, details? }
+      if (route("POST", /^\/api\/reports$/)) {
+        requireUser(user);
+        await rateLimit(env.WRITE_LIMITER, `write:${user.userId}`);
+        const body = await readJson(request);
+        const targetType = body.target_type;
+        const targetId = parseId(body.target_id);
+        if (!REPORT_TARGETS.includes(targetType)) {
+          return json({ error: "Invalid target_type" }, 400);
+        }
+        if (!REPORT_REASONS.includes(body.reason)) {
+          throw new HttpError(400, "Invalid reason", "invalid_reason");
+        }
+        const details = limitText(
+          typeof body.details === "string" ? body.details.trim() : "",
+          500,
+          "details",
+        );
+
+        // The target must exist, and you can't report yourself or your own post
+        const target =
+          targetType === "post"
+            ? await env.DB.prepare("SELECT user_id AS owner FROM posts WHERE id = ?").bind(targetId).first()
+            : await env.DB.prepare("SELECT id AS owner FROM login_data WHERE id = ? AND user_type = ?")
+                .bind(targetId, targetType === "venue" ? 2 : 1)
+                .first();
+        if (!target) return json({ error: "Not found" }, 404);
+        if (target.owner === user.userId) {
+          return json({ error: "You cannot report yourself" }, 400);
+        }
+
+        // Reporting the same thing twice just keeps the first report
+        await env.DB.prepare(
+          `INSERT OR IGNORE INTO reports (reporter_id, target_type, target_id, reason, details)
+           VALUES (?, ?, ?, ?, ?)`,
+        )
+          .bind(user.userId, targetType, targetId, body.reason, details || null)
+          .run();
+        return json({ success: true }, 201);
+      }
+
+      // GET /api/users/:id/followers  – People following this account
+      // GET /api/users/:id/following  – People this account follows
+      // Newest first. People blocked either way (with the caller) are left out.
+      if ((match = route("GET", /^\/api\/users\/([^/]+)\/(followers|following)$/))) {
+        requireUser(user);
+        const targetId = parseId(match[1]);
+        if (targetId !== user.userId && (await isBlockedEitherWay(env.DB, user.userId, targetId))) {
+          return json({ error: "Not found" }, 404);
+        }
+        // followers: rows where the account is followed; following: where it follows
+        const [matchColumn, personColumn] =
+          match[2] === "followers" ? ["following_id", "follower_id"] : ["follower_id", "following_id"];
+
+        const { results } = await env.DB.prepare(
+          `SELECT f.${personColumn} AS id,
+                  ld.user_type,
+                  COALESCE(up.username, vp.username) AS username,
+                  COALESCE(up.first_name, vp.title) AS first_name,
+                  up.last_name,
+                  up.profile_photo,
+                  EXISTS (SELECT 1 FROM follows mine
+                          WHERE mine.follower_id = ? AND mine.following_id = f.${personColumn}) AS is_following
+           FROM follows f
+           JOIN login_data ld ON ld.id = f.${personColumn}
+           LEFT JOIN user_profile up ON up.id = f.${personColumn}
+           LEFT JOIN venue_profile vp ON vp.id = f.${personColumn}
+           WHERE f.${matchColumn} = ?
+             AND ${NOT_BLOCKED_SQL(`f.${personColumn}`)}
+           ORDER BY f.create_date DESC, f.rowid DESC
+           LIMIT 500`,
+        )
+          .bind(user.userId, targetId, user.userId, user.userId)
+          .all();
+
+        return json(
+          results.map((row) => ({
+            ...row,
+            profile_photo: toImageUrl(row.profile_photo),
+            is_following: !!row.is_following,
+            is_me: row.id === user.userId,
+          })),
+        );
+      }
+
       // PUT / DELETE /api/users/:id/follow  – Follow / unfollow a user
       if ((match = toggleRoute(/^\/api\/users\/([^/]+)\/follow$/))) {
         requireUser(user);
@@ -981,6 +1222,11 @@ export default {
           .first();
 
         if (!target) return json({ error: "User not found" }, 404);
+
+        await rateLimit(env.WRITE_LIMITER, `write:${user.userId}`);
+        if (method === "PUT" && (await isBlockedEitherWay(env.DB, user.userId, targetId))) {
+          throw new HttpError(403, "You can't follow this account", "blocked");
+        }
 
         const statement =
           method === "PUT"
@@ -1053,7 +1299,7 @@ export default {
 
         // Must be the owner and a venue (type 2)
         if (user.userId !== userId || user.userType !== 2) {
-          return json({ error: "Unauthorized" }, 401);
+          return json({ error: "Forbidden" }, 403);
         }
 
         const body = await readJson(request);
@@ -1079,31 +1325,43 @@ export default {
         }
         if ("title" in body) {
           updates.push("title = ?");
-          values.push(body.title);
+          values.push(limitText(body.title, 80, "title"));
         }
         if ("address" in body) {
           updates.push("address = ?");
-          values.push(body.address);
+          values.push(limitText(body.address, 200, "address"));
         }
         if ("about" in body) {
           updates.push("about = ?");
-          values.push(body.about);
+          values.push(limitText(body.about, 2000, "about"));
         }
         if ("status" in body) {
           updates.push("status = ?");
-          values.push(body.status);
+          values.push(limitText(body.status, 300, "status"));
         }
         if ("public_status" in body) {
+          if (body.public_status !== 0 && body.public_status !== 1) {
+            return json({ error: "public_status must be 0 or 1" }, 400);
+          }
           updates.push("public_status = ?");
           values.push(body.public_status);
         }
         if ("open_hours" in body) {
           updates.push("open_hours = ?");
-          values.push(body.open_hours);
+          values.push(limitText(body.open_hours, 100, "open_hours"));
         }
         if ("lat_long" in body) {
+          // "lat,long" with real coordinates, or empty to clear
+          const latLong = String(body.lat_long ?? "").trim();
+          const [lat, lon] = latLong.split(",").map(Number);
+          if (
+            latLong &&
+            !(/^-?\d+(\.\d+)?,-?\d+(\.\d+)?$/.test(latLong) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180)
+          ) {
+            return json({ error: "Invalid lat_long" }, 400);
+          }
           updates.push("lat_long = ?");
-          values.push(body.lat_long);
+          values.push(latLong || null);
         }
 
         // Venue types replace the current set (array or comma-separated string)
@@ -1243,18 +1501,22 @@ export default {
         is_interested: !!event.is_interested,
       });
 
-      // GET /api/events  – List events (optionally filter by venue_id)
+      // GET /api/events  – Upcoming events, soonest first
+      //   ?venue_id=   one venue's events
+      //   ?include_past=1   also past events (only for the venue's own list)
       if (route("GET", /^\/api\/events$/)) {
         requireUser(user);
-        const venueIdParam = searchParams.get("venue_id");
+        const venueId = searchParams.get("venue_id") ? parseId(searchParams.get("venue_id")) : null;
+        const includePast = searchParams.get("include_past") === "1" && venueId === user.userId;
 
-        const { results } = venueIdParam
-          ? await env.DB.prepare(`${EVENT_SELECT} AND e.venue_id = ?`)
-              .bind(user.userId, user.userId, parseId(venueIdParam))
-              .all()
-          : await env.DB.prepare(EVENT_SELECT)
-              .bind(user.userId, user.userId)
-              .all();
+        const { results } = await env.DB.prepare(
+          `${EVENT_SELECT}
+             AND (? IS NULL OR e.venue_id = ?)
+             AND (? = 1 OR e.starts_at >= ?)
+           ORDER BY ${includePast ? "e.starts_at DESC" : "e.starts_at ASC"}`,
+        )
+          .bind(user.userId, user.userId, venueId, venueId, includePast ? 1 : 0, upcomingCutoff())
+          .all();
 
         return json(results.map(formatEvent));
       }
@@ -1275,17 +1537,21 @@ export default {
 
       // POST /api/events  – Create event (venues only)
       if (route("POST", /^\/api\/events$/)) {
-        if (!user || user.userType !== 2) {
-          return json({ error: "Unauthorized or not a venue" }, 401);
+        requireUser(user);
+        if (user.userType !== 2) {
+          return json({ error: "Only venues can do this" }, 403);
         }
 
         const body = await readJson(request);
-        const { venue_id, title, time, about } = body;
+        const { venue_id, title, about } = body;
         const photo_id = toImageKey(body.photo_id);
 
-        if (!venue_id || !title || !time || !about || !photo_id) {
+        if (!venue_id || !title || !body.starts_at || !about || !photo_id) {
           return json({ error: "Missing required fields" }, 400);
         }
+        limitText(title, 100, "title");
+        limitText(about, 2000, "about");
+        const startsAt = parseStartsAt(body.starts_at);
 
         // Venue can only create events for itself
         if (parseInt(venue_id) !== user.userId) {
@@ -1302,12 +1568,14 @@ export default {
 
         // Insert event
         const result = await env.DB.prepare(
-          "INSERT INTO events (venue_id, title, time, about, photo_id, create_date) VALUES (?, ?, ?, ?, ?, ?)",
+          // `time` gets the same value, for older app versions
+          "INSERT INTO events (venue_id, title, time, starts_at, about, photo_id, create_date) VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
           .bind(
             user.userId,
             title,
-            time,
+            startsAt,
+            startsAt,
             about,
             photo_id,
             new Date().toISOString(),
@@ -1362,13 +1630,14 @@ export default {
 
       // PUT /api/events/:id  – Update event (owner venue only)
       if ((match = route("PUT", /^\/api\/events\/([^/]+)$/))) {
-        if (!user || user.userType !== 2) {
-          return json({ error: "Unauthorized or not a venue" }, 401);
+        requireUser(user);
+        if (user.userType !== 2) {
+          return json({ error: "Only venues can do this" }, 403);
         }
 
         const id = parseId(match[1]);
         const body = await readJson(request);
-        const { title, time, about } = body;
+        const { title, about } = body;
         const photo_id = toImageKey(body.photo_id);
 
         const updates = [];
@@ -1376,15 +1645,16 @@ export default {
 
         if (title) {
           updates.push("title = ?");
-          values.push(title);
+          values.push(limitText(title, 100, "title"));
         }
-        if (time) {
-          updates.push("time = ?");
-          values.push(time);
+        if (body.starts_at) {
+          const startsAt = parseStartsAt(body.starts_at);
+          updates.push("starts_at = ?", "time = ?");
+          values.push(startsAt, startsAt);
         }
         if (about) {
           updates.push("about = ?");
-          values.push(about);
+          values.push(limitText(about, 2000, "about"));
         }
         if (photo_id !== undefined) {
           updates.push("photo_id = ?");
@@ -1439,8 +1709,9 @@ export default {
 
       // DELETE /api/events/:id  – Delete event (owner venue only)
       if ((match = route("DELETE", /^\/api\/events\/([^/]+)$/))) {
-        if (!user || user.userType !== 2) {
-          return json({ error: "Unauthorized or not a venue" }, 401);
+        requireUser(user);
+        if (user.userType !== 2) {
+          return json({ error: "Only venues can do this" }, 403);
         }
 
         const eventId = parseId(match[1]);
@@ -1474,15 +1745,18 @@ export default {
       // POSTS ROUTES
       // ════════════════════════════════════════════
 
-      // GET /api/posts  – List all posts (newest first)
+      // GET /api/posts  – List posts, newest first (?user_id= for one person's posts)
       if (route("GET", /^\/api\/posts$/)) {
         requireUser(user);
+        const userIdParam = searchParams.get("user_id");
+        const authorId = userIdParam ? parseId(userIdParam) : null;
 
         const { results } = await env.DB.prepare(
           `
           SELECT
             p.id,
             p.user_id,
+            (SELECT ld.user_type FROM login_data ld WHERE ld.id = p.user_id) AS user_type,
             up.username,
             up.profile_photo AS user_image,
             p.photo_id AS post_image,
@@ -1494,10 +1768,12 @@ export default {
                     WHERE l.post_id = p.id AND l.user_id = ?) AS isLiked
           FROM posts p
           LEFT JOIN user_profile up ON p.user_id = up.id
+          WHERE (? IS NULL OR p.user_id = ?)
+            AND ${NOT_BLOCKED_SQL("p.user_id")}
           ORDER BY p.create_date DESC
         `,
         )
-          .bind(user.userId)
+          .bind(user.userId, authorId, authorId, user.userId, user.userId)
           .all();
 
         return json(
@@ -1515,6 +1791,7 @@ export default {
       // POST /api/posts  – Create a post
       if (route("POST", /^\/api\/posts$/)) {
         requireUser(user);
+        await rateLimit(env.WRITE_LIMITER, `write:${user.userId}`);
 
         const body = await readJson(request);
         const { user_id, post_text, location_tag } = body;
@@ -1555,7 +1832,12 @@ export default {
         const result = await env.DB.prepare(
           "INSERT INTO posts (user_id, post_text, location_tag, photo_id) VALUES (?, ?, ?, ?)",
         )
-          .bind(parsedUserId, post_text || "", location_tag || "", photo_id)
+          .bind(
+            parsedUserId,
+            limitText(post_text || "", 2200, "post_text"),
+            limitText(location_tag || "", 100, "location_tag"),
+            photo_id,
+          )
           .run();
 
         if (result.meta.changes === 0) {
@@ -1634,6 +1916,7 @@ export default {
       // POST /api/feedback  – Send feedback from the app
       if (route("POST", /^\/api\/feedback$/)) {
         requireUser(user);
+        await rateLimit(env.WRITE_LIMITER, `write:${user.userId}`);
         const { category, message } = await readJson(request);
         const text = typeof message === "string" ? message.trim() : "";
 
@@ -1659,6 +1942,19 @@ export default {
         return json({ success: true }, 201);
       }
 
+      // Connections, Discover, chat requests, chats, push tokens (src/social.js)
+      const socialResponse = await handleSocial({
+        request,
+        env,
+        ctx,
+        user,
+        method,
+        route,
+        searchParams,
+        rateLimit,
+      });
+      if (socialResponse) return socialResponse;
+
       // ── Fallback ─────────────────────────────────
       return json({ error: "Not found" }, 404);
     } catch (err) {
@@ -1671,5 +1967,12 @@ export default {
       console.error(`Unhandled error on ${method} ${pathname}:`, err);
       return json({ error: "Server error" }, 500);
     }
+  },
+
+  // Cron (see wrangler.toml): removes ended chats so those pairs can meet again
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(
+      cleanUpExpiredChats(env).then((count) => console.log(`Cleaned up ${count} ended chats`)),
+    );
   },
 };

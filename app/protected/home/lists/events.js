@@ -14,7 +14,7 @@ import {
 } from "react-native";
 import InterestCheck from "../../../../components/InterestCheck";
 import { api, getSession } from "../../../../lib/api";
-import { parseEventTime } from "../../../../lib/format";
+import { eventStart, formatEventTime, parseEventTime } from "../../../../lib/format";
 import { interests } from "../../../../lib/toggles";
 import { useI18n } from "../../../../lib/i18n";
 import { makeStyles, useTheme } from "../../../../lib/theme-context";
@@ -72,7 +72,7 @@ const EventCard = memo(function EventCard({ event, showInterest, onPress }) {
         <View style={styles.infoRow}>
           <MaterialIcons name="schedule" size={16} color={COLORS.accent} />
           <Text style={styles.infoText} numberOfLines={1}>
-            {when ? `${when.day} ${when.month} · ${when.hour}` : event.time}
+            {formatEventTime(event.time)}
           </Text>
         </View>
       </View>
@@ -118,7 +118,7 @@ export default function Events() {
               id: event.id.toString(),
               title: event.title || t("event.numbered", { number: index + 1 }),
               venueName: await venueName(event.venue_id),
-              time: event.time || t("event.noTime"),
+              time: eventStart(event) || t("event.noTime"),
               image: event.photo_id || null,
             })),
           );

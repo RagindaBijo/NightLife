@@ -17,7 +17,9 @@ import {
 } from "react-native";
 import FavoriteStar from "../../../components/FavoriteStar";
 import InterestCheck from "../../../components/InterestCheck";
+import SwipeableTabContent from "../../../components/SwipeableTabContent";
 import { api, getSession } from "../../../lib/api";
+import { eventStart, formatEventTime } from "../../../lib/format";
 import { translate, useI18n } from "../../../lib/i18n";
 import { favorites, interests } from "../../../lib/toggles";
 import { makeStyles, useTheme } from "../../../lib/theme-context";
@@ -36,10 +38,8 @@ const TABS = [
 // ── Data loaders for each tab ────────────────────
 
 async function loadPosts(userId) {
-  const data = await api("/api/posts");
-  return data
-    .filter((post) => String(post.user_id) === String(userId))
-    .map((post) => ({ id: String(post.id), image: post.post_image }));
+  const data = await api(`/api/posts?user_id=${encodeURIComponent(userId)}`);
+  return data.map((post) => ({ id: String(post.id), image: post.post_image }));
 }
 
 async function loadFavorites() {
@@ -81,7 +81,7 @@ async function loadInterested() {
         id: String(event.id),
         title: event.title || translate("event.fallbackTitle"),
         subtitle: await venueName(event.venue_id),
-        meta: event.time || translate("event.noTime"),
+        meta: eventStart(event) ? formatEventTime(eventStart(event)) : translate("event.noTime"),
         image: event.photo_id || null,
       })),
   );
@@ -510,6 +510,15 @@ export default function Profile() {
           >
             <MaterialIcons name="add-box" size={28} color={COLORS.text} />
           </Pressable>
+          <Pressable
+            onPress={() => router.push("/protected/settings-folder/settings")}
+            hitSlop={10}
+            style={({ pressed }) => [styles.settingsButton, pressed && styles.pressed]}
+            accessibilityRole="button"
+            accessibilityLabel={t("tabs.settings")}
+          >
+            <MaterialIcons name="settings" size={26} color={COLORS.text} />
+          </Pressable>
         </View>
 
         <View style={styles.identityRow}>
@@ -538,12 +547,22 @@ export default function Profile() {
             <Stat
               value={user.followers}
               label={t("profile.followers")}
-              onPress={() => router.push("/protected/profile-folder/follow")}
+              onPress={() =>
+                router.push({
+                  pathname: "/protected/profile-folder/follow",
+                  params: { tab: "followers", username: user.username },
+                })
+              }
             />
             <Stat
               value={user.following}
               label={t("profile.following")}
-              onPress={() => router.push("/protected/profile-folder/follow")}
+              onPress={() =>
+                router.push({
+                  pathname: "/protected/profile-folder/follow",
+                  params: { tab: "following", username: user.username },
+                })
+              }
             />
           </View>
         </View>
@@ -596,7 +615,14 @@ export default function Profile() {
       </View>
 
       {/* Active tab */}
-      <View style={styles.tabContent}>{renderTabContent()}</View>
+      <SwipeableTabContent
+        style={styles.tabContent}
+        index={TABS.findIndex((tab) => tab.key === activeTab)}
+        count={TABS.length}
+        onChange={(index) => selectTab(TABS[index].key)}
+      >
+        {renderTabContent()}
+      </SwipeableTabContent>
     </ScrollView>
   );
 }
@@ -628,6 +654,9 @@ const useStyles = makeStyles((COLORS) => ({
     alignItems: "center",
     justifyContent: "space-between",
     paddingVertical: 12,
+  },
+  settingsButton: {
+    marginLeft: 16,
   },
   handle: {
     flex: 1,

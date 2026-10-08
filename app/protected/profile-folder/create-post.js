@@ -210,6 +210,7 @@ export default function CreatePost() {
           <TextInput
             style={styles.captionInput}
             placeholder={t("createPost.captionPlaceholder")}
+            maxLength={2200}
             placeholderTextColor={COLORS.placeholder}
             selectionColor={COLORS.accent}
             value={caption}
@@ -236,6 +237,7 @@ export default function CreatePost() {
           <TextInput
             style={styles.locationInput}
             placeholder={t("createPost.locationPlaceholder")}
+            maxLength={100}
             placeholderTextColor={COLORS.placeholder}
             selectionColor={COLORS.accent}
             value={location}

@@ -21,3 +21,37 @@ migrations_dir = "migrations"
 [[r2_buckets]]
 binding = "R2"
 bucket_name = "night-life-images"
+
+# Rate limits (per key, per 60 seconds). Over the limit → 429 "rate_limited".
+# Login / sign-up, per IP address: stops password guessing and sign-up spam
+[[ratelimits]]
+name = "AUTH_LIMITER"
+namespace_id = "1001"
+simple = { limit = 10, period = 60 }
+
+# Username check and people search, per user (or IP before login)
+[[ratelimits]]
+name = "SEARCH_LIMITER"
+namespace_id = "1002"
+simple = { limit = 60, period = 60 }
+
+# Live chat rooms: one Durable Object per chat holds its open WebSockets
+[[durable_objects.bindings]]
+name = "CHAT_ROOMS"
+class_name = "ChatRoom"
+
+# Durable Object class history (not database migrations). SQLite-backed
+# classes are what the free plan supports.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ChatRoom"]
+
+# Every hour: delete ended chats (see `scheduled` in src/index.js)
+[triggers]
+crons = ["0 * * * *"]
+
+# Uploads, posts, follows, blocks, reports, feedback, per user
+[[ratelimits]]
+name = "WRITE_LIMITER"
+namespace_id = "1003"
+simple = { limit = 30, period = 60 }

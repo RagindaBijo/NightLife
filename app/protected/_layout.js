@@ -1,10 +1,11 @@
-import { Entypo, FontAwesome, Fontisto } from "@expo/vector-icons";
+import { Entypo, FontAwesome, MaterialCommunityIcons } from "@expo/vector-icons";
 import { Redirect, Tabs } from "expo-router";
 import { useEffect, useState } from "react";
 import { ActivityIndicator, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { getSession } from "../../lib/api";
 import { useI18n } from "../../lib/i18n";
+import { usePushNotifications } from "../../lib/push";
 import { UserTypeContext } from "../../lib/session-context";
 import { useTheme } from "../../lib/theme-context";
 
@@ -13,6 +14,7 @@ export default function Layout() {
   const { t } = useI18n();
   const [authState, setAuthState] = useState("checking"); // checking | in | out
   const [userType, setUserType] = useState(null); // "1" = user, "2" = venue
+  const isVenue = userType === "2";
 
   useEffect(() => {
     getSession()
@@ -25,6 +27,9 @@ export default function Layout() {
         setAuthState("out");
       });
   }, []);
+
+  // Push notifications for matches, requests and messages (personal accounts)
+  usePushNotifications({ enabled: authState === "in" && userType === "1" });
 
   // Auth guard: protected screens need a logged-in session
   if (authState === "checking") {
@@ -45,8 +50,11 @@ export default function Layout() {
         edges={["top"]}
       >
         <Tabs
+          // Android back goes to the previous tab (Settings is opened from Profile)
+          backBehavior="history"
           screenOptions={{
             headerShown: false,
+            tabBarHideOnKeyboard: true,
             tabBarStyle: {
               backgroundColor: COLORS.background,
               borderTopColor: COLORS.border,
@@ -76,21 +84,35 @@ export default function Layout() {
             }}
           />
 
+          {/* Discover and Chat are for people (18+), not venues */}
           <Tabs.Screen
-            name="chat-folder"
+            name="discover"
             options={{
-              title: t("tabs.chat"),
+              title: t("tabs.discover"),
+              href: isVenue ? null : undefined,
               tabBarIcon: ({ color, size }) => (
-                <FontAwesome name="wechat" size={size} color={color} />
+                <MaterialCommunityIcons name="cards" size={size} color={color} />
               ),
             }}
           />
+
           <Tabs.Screen
             name="social"
             options={{
               title: t("tabs.social"),
               tabBarIcon: ({ color, size }) => (
                 <Entypo name="network" size={size} color={color} />
+              ),
+            }}
+          />
+
+          <Tabs.Screen
+            name="chat-folder"
+            options={{
+              title: t("tabs.chat"),
+              href: isVenue ? null : undefined,
+              tabBarIcon: ({ color, size }) => (
+                <FontAwesome name="wechat" size={size} color={color} />
               ),
             }}
           />
@@ -103,22 +125,14 @@ export default function Layout() {
                 <FontAwesome name="user" size={size} color={color} />
               ),
               // Only the profile matching the account type exists (see profile-folder/_layout.js)
-              href:
-                userType === "2"
-                  ? "/protected/profile-folder/venue-profile"
-                  : "/protected/profile-folder/profile",
+              href: isVenue
+                ? "/protected/profile-folder/venue-profile"
+                : "/protected/profile-folder/profile",
             }}
           />
 
-          <Tabs.Screen
-            name="settings-folder"
-            options={{
-              title: t("tabs.settings"),
-              tabBarIcon: ({ color, size }) => (
-                <Fontisto name="player-settings" size={size} color={color} />
-              ),
-            }}
-          />
+          {/* Not in the tab bar: opened from the gear on the profile */}
+          <Tabs.Screen name="settings-folder" options={{ href: null }} />
         </Tabs>
       </SafeAreaView>
     </UserTypeContext.Provider>

@@ -14,6 +14,7 @@ import {
   View,
 } from "react-native";
 import { api, clearSession, getSession } from "../../../lib/api";
+import { unregisterPush } from "../../../lib/push";
 import { APP_INFO } from "../../../lib/appInfo";
 import { LANGUAGES, useI18n } from "../../../lib/i18n";
 import { useUserType } from "../../../lib/session-context";
@@ -152,7 +153,7 @@ function HelpSheet({ visible, onClose, onFeedback }) {
   };
 
   return (
-    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
       <View style={styles.sheetBackdrop}>
         <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
         <View style={styles.sheet}>
@@ -254,6 +255,8 @@ export default function Settings() {
         style: "destructive",
         onPress: async () => {
           try {
+            // Stop push to this phone before the session is gone
+            await unregisterPush();
             await clearSession();
             router.replace("/login");
           } catch (err) {
@@ -304,7 +307,18 @@ export default function Settings() {
   return (
     <View style={styles.container}>
       <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-        <Text style={styles.title}>{t("settings.title")}</Text>
+        <View style={styles.titleRow}>
+          <Pressable
+            onPress={() => router.back()}
+            hitSlop={10}
+            style={({ pressed }) => [styles.backButton, pressed && styles.pressed]}
+            accessibilityRole="button"
+            accessibilityLabel={t("common.goBack")}
+          >
+            <MaterialIcons name="arrow-back" size={24} color={COLORS.text} />
+          </Pressable>
+          <Text style={styles.title}>{t("settings.title")}</Text>
+        </View>
 
         {/* Account card */}
         <LinearGradient
@@ -349,6 +363,11 @@ export default function Settings() {
                   : "/protected/profile-folder/edit-profile",
               )
             }
+          />
+          <Row
+            icon="block"
+            label={t("settings.blockedAccounts")}
+            onPress={() => router.push("/protected/settings-folder/blocked")}
           />
           <Row icon="notifications-none" label={t("settings.notifications")} badge={t("settings.soon")} />
           <Row icon="lock-outline" label={t("settings.passwordSecurity")} badge={t("settings.soon")} last />
@@ -431,11 +450,23 @@ const useStyles = makeStyles((COLORS) => ({
   pressed: {
     opacity: 0.6,
   },
+  titleRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    marginTop: 4,
+  },
+  backButton: {
+    width: 36,
+    height: 36,
+    marginLeft: -6,
+    alignItems: "center",
+    justifyContent: "center",
+  },
   title: {
     color: COLORS.text,
     fontSize: 28,
     fontWeight: "800",
-    marginTop: 4,
   },
 
   // Account card

@@ -6,63 +6,81 @@ import { useLocalSearchParams, useNavigation, useRouter } from 'expo-router';
 import { useEffect, useLayoutEffect, useState } from 'react';
 import { Alert, Keyboard, Modal, StyleSheet, Text, TextInput, TouchableOpacity, TouchableWithoutFeedback, View } from 'react-native';
 import { API_URL, api, getSession } from '../../../lib/api';
+import { formatClock } from '../../../lib/format';
 import { translate, useI18n } from '../../../lib/i18n';
 import { makeStyles, useTheme } from '../../../lib/theme-context';
 
-const days = Array.from({ length: 31 }, (_, i) => (i + 1).toString().padStart(2, '0'));
-const months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
-const hours = Array.from({ length: 12 }, (_, i) => (i + 1).toString().padStart(1, '0'));
+const LEGACY_MONTHS = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
+const MINUTES = [0, 15, 30, 45];
 
-function parseEventDateTime(timeStr) {
-  const defaultValues = {
-    selectedDay: '01',
-    selectedMonth: 'January',
-    eventHour: '8',
-    eventPeriod: 'PM',
-  };
-  if (!timeStr) return defaultValues;
+const daysInMonth = (year, month) => new Date(year, month + 1, 0).getDate();
 
-  const [datePart, timePart] = timeStr.split(': ');
-  let selectedDay = '01';
-  let selectedMonth = 'January';
-  if (datePart) {
-    const [day, month] = datePart.split('-').map(s => s.trim());
-    selectedDay = days.includes(day) ? day : '01';
-    selectedMonth = months.includes(month) ? month : 'January';
+/** Default for a new event: tomorrow at 22:00. */
+function defaultStart() {
+  const date = new Date();
+  date.setDate(date.getDate() + 1);
+  date.setHours(22, 0, 0, 0);
+  return date;
+}
+
+/**
+ * Start time of an existing event as a Date. Reads the real start time, or the
+ * old text format ("05-March: 8PM", no year → its next occurrence).
+ */
+function startOf(event) {
+  if (event.starts_at) {
+    const date = new Date(event.starts_at);
+    if (!isNaN(date.getTime())) return date;
   }
-
-  const eventHour = timePart ? timePart.slice(0, -2) : '8';
-  const eventPeriod = timePart ? timePart.slice(-2) : 'PM';
-  return { selectedDay, selectedMonth, eventHour, eventPeriod };
+  const match = /^(\d{1,2})-([A-Za-z]+):\s*(\d{1,2})\s*(AM|PM)$/i.exec(event.time || '');
+  if (!match) return defaultStart();
+  const month = LEGACY_MONTHS.findIndex((name) => name.startsWith(match[2].slice(0, 3).toLowerCase()));
+  const hour = (Number(match[3]) % 12) + (match[4].toUpperCase() === 'PM' ? 12 : 0);
+  const date = new Date(new Date().getFullYear(), Math.max(month, 0), Number(match[1]), hour, 0, 0, 0);
+  if (date < new Date()) date.setFullYear(date.getFullYear() + 1);
+  return date;
 }
 
-function formatEventDate(day, month) {
-  return `${day}-${month}`;
-}
+/** Date → the picker values ({ year, month, day, hour, minute }). */
+const toParts = (date) => ({
+  year: date.getFullYear(),
+  month: date.getMonth(),
+  day: date.getDate(),
+  hour: date.getHours(),
+  minute: MINUTES.includes(date.getMinutes()) ? date.getMinutes() : 0,
+});
+
+const fromParts = ({ year, month, day, hour, minute }) =>
+  new Date(year, month, Math.min(day, daysInMonth(year, month)), hour, minute, 0, 0);
 
 export default function CreateEvent() {
   const { colors: COLORS } = useTheme();
   const { t } = useI18n();
-  const monthLabel = (month) => t('months.long')[months.indexOf(month)] ?? month;
+  const use24h = t('format.timeStyle') === '24h';
   const styles = useStyles();
   const navigation = useNavigation();
   const router = useRouter();
   const { eventId } = useLocalSearchParams();
   const isEditing = !!eventId;
 
-  const [form, setForm] = useState({
+  const [form, setForm] = useState(() => ({
     title: '',
     about: '',
-    selectedDay: '01',
-    selectedMonth: 'January',
-    eventHour: '8',
-    eventPeriod: 'PM',
+    ...toParts(defaultStart()),
     photo_uri: null,
     photo_id: null,
-  });
+  }));
+  // When editing, the start time is only sent if it was changed
+  const [originalStart, setOriginalStart] = useState(null);
   const [showDateModal, setShowDateModal] = useState(false);
   const [showTimeModal, setShowTimeModal] = useState(false);
   const [loading, setLoading] = useState(false);
+
+  const start = fromParts(form);
+  const thisYear = new Date().getFullYear();
+  const years = [thisYear, thisYear + 1];
+  const dayCount = daysInMonth(form.year, form.month);
+  const setPart = (part) => (value) => setForm((prev) => ({ ...prev, [part]: Number(value) }));
 
   useLayoutEffect(() => {
     navigation.setOptions({
@@ -85,14 +103,12 @@ export default function CreateEvent() {
       if (!eventId) return;
       try {
         const data = await api(`/api/events/${eventId}`);
-        const { selectedDay, selectedMonth, eventHour, eventPeriod } = parseEventDateTime(data.time || '');
+        const startDate = startOf(data);
+        setOriginalStart(data.starts_at ? startDate.toISOString() : null);
         setForm({
           title: data.title || '',
           about: data.about || '',
-          selectedDay,
-          selectedMonth,
-          eventHour,
-          eventPeriod,
+          ...toParts(startDate),
           photo_uri: data.photo_id || null,
           photo_id: data.photo_id ? data.photo_id.replace(`${API_URL}/images/`, '') : null,
         });
@@ -144,8 +160,14 @@ export default function CreateEvent() {
   };
 
   const handleSave = async () => {
-    if (!form.title || !form.about || !form.selectedDay || !form.selectedMonth || !form.photo_uri) {
+    if (!form.title || !form.about || !form.photo_uri) {
       Alert.alert(t('common.error'), t('createEvent.missingFields'));
+      return;
+    }
+    const startsAt = fromParts(form).toISOString();
+    const startChanged = startsAt !== originalStart;
+    if (startChanged && new Date(startsAt) < new Date()) {
+      Alert.alert(t('common.error'), t('createEvent.inPast'));
       return;
     }
 
@@ -158,16 +180,15 @@ export default function CreateEvent() {
         return;
       }
 
-      const formattedDate = formatEventDate(form.selectedDay, form.selectedMonth);
-      const time = `${formattedDate}: ${form.eventHour}${form.eventPeriod}`;
       const photo_id = await uploadImage();
 
       const requestBody = {
         venue_id: session.userId,
         title: form.title,
-        time,
         about: form.about,
         photo_id,
+        // Unchanged start time isn't re-sent (an event that already started can still be edited)
+        ...(startChanged ? { starts_at: startsAt } : {}),
       };
 
       await api(isEditing ? `/api/events/${eventId}` : '/api/events', {
@@ -181,9 +202,11 @@ export default function CreateEvent() {
       console.error(`${isEditing ? 'Update' : 'Create'} event failed:`, error.message);
       Alert.alert(
         t('common.error'),
-        error.status === 0
-          ? (isEditing ? t('createEvent.updateNetworkError') : t('createEvent.createNetworkError'))
-          : error.message || (isEditing ? t('createEvent.updateFailed') : t('createEvent.createFailed'))
+        error.code === 'starts_at_past'
+          ? t('createEvent.inPast')
+          : error.status === 0
+            ? (isEditing ? t('createEvent.updateNetworkError') : t('createEvent.createNetworkError'))
+            : error.message || (isEditing ? t('createEvent.updateFailed') : t('createEvent.createFailed'))
       );
     }
     setLoading(false);
@@ -195,7 +218,11 @@ export default function CreateEvent() {
     setShowTimeModal(false);
   };
 
-  const formattedDate = formatEventDate(form.selectedDay, form.selectedMonth);
+  // 12-hour pickers (English): hour 1–12 + AM/PM; 24-hour: 0–23
+  const hour12 = form.hour % 12 || 12;
+  const period = form.hour < 12 ? 'AM' : 'PM';
+  const setHour12 = (value, nextPeriod = period) =>
+    setForm((prev) => ({ ...prev, hour: (Number(value) % 12) + (nextPeriod === 'PM' ? 12 : 0) }));
 
   return (
     <TouchableWithoutFeedback onPress={handleOutsidePress}>
@@ -206,6 +233,7 @@ export default function CreateEvent() {
           value={form.title}
           onChangeText={(text) => setForm({ ...form, title: text })}
           placeholder={t('createEvent.titlePlaceholder')}
+          maxLength={100}
           placeholderTextColor={COLORS.placeholder}
         />
         <Text style={styles.header}>{t('createEvent.about')}</Text>
@@ -214,6 +242,7 @@ export default function CreateEvent() {
           value={form.about}
           onChangeText={(text) => setForm({ ...form, about: text })}
           placeholder={t('createEvent.aboutPlaceholder')}
+          maxLength={2000}
           placeholderTextColor={COLORS.placeholder}
           multiline
         />
@@ -221,12 +250,12 @@ export default function CreateEvent() {
         <View style={styles.timeContainer}>
           <TouchableOpacity onPress={() => setShowDateModal(true)}>
             <Text style={styles.pressableText}>
-              {formattedDate ? `${form.selectedDay}-${monthLabel(form.selectedMonth)}` : t('createEvent.selectDate')}
+              {`${form.day} ${t('months.long')[form.month]} ${form.year}`}
             </Text>
           </TouchableOpacity>
-          <Text style={styles.separatorText}>: </Text>
+          <Text style={styles.separatorText}> · </Text>
           <TouchableOpacity onPress={() => setShowTimeModal(true)}>
-            <Text style={styles.pressableText}>{form.eventHour}{form.eventPeriod}</Text>
+            <Text style={styles.pressableText}>{formatClock(start)}</Text>
           </TouchableOpacity>
         </View>
         <Text style={styles.header}>{form.photo_uri ? t('createEvent.imageSelected') : t('createEvent.image')}</Text>
@@ -258,21 +287,30 @@ export default function CreateEvent() {
                   <Text style={styles.modalTitle}>{t('createEvent.selectDateTitle')}</Text>
                   <View style={styles.pickerContainer}>
                     <Picker
-                      selectedValue={form.selectedDay}
-                      onValueChange={(itemValue) => setForm({ ...form, selectedDay: itemValue })}
-                      style={styles.picker}
+                      selectedValue={Math.min(form.day, dayCount)}
+                      onValueChange={setPart('day')}
+                      style={[styles.picker, styles.pickerThird]}
                     >
-                      {days.map((d) => (
-                        <Picker.Item key={d} label={d} value={d} />
+                      {Array.from({ length: dayCount }, (_, i) => i + 1).map((d) => (
+                        <Picker.Item key={d} label={String(d)} value={d} />
                       ))}
                     </Picker>
                     <Picker
-                      selectedValue={form.selectedMonth}
-                      onValueChange={(itemValue) => setForm({ ...form, selectedMonth: itemValue })}
-                      style={styles.picker}
+                      selectedValue={form.month}
+                      onValueChange={setPart('month')}
+                      style={[styles.picker, styles.pickerThird]}
                     >
-                      {months.map((m) => (
-                        <Picker.Item key={m} label={monthLabel(m)} value={m} />
+                      {t('months.long').map((label, index) => (
+                        <Picker.Item key={label} label={label} value={index} />
+                      ))}
+                    </Picker>
+                    <Picker
+                      selectedValue={form.year}
+                      onValueChange={setPart('year')}
+                      style={[styles.picker, styles.pickerThird]}
+                    >
+                      {years.map((y) => (
+                        <Picker.Item key={y} label={String(y)} value={y} />
                       ))}
                     </Picker>
                   </View>
@@ -295,23 +333,46 @@ export default function CreateEvent() {
                 <View style={styles.modalContent}>
                   <Text style={styles.modalTitle}>{t('createEvent.selectTimeTitle')}</Text>
                   <View style={styles.pickerContainer}>
+                    {use24h ? (
+                      <Picker
+                        selectedValue={form.hour}
+                        onValueChange={setPart('hour')}
+                        style={[styles.picker, styles.pickerThird]}
+                      >
+                        {Array.from({ length: 24 }, (_, h) => h).map((h) => (
+                          <Picker.Item key={h} label={String(h).padStart(2, '0')} value={h} />
+                        ))}
+                      </Picker>
+                    ) : (
+                      <Picker
+                        selectedValue={hour12}
+                        onValueChange={(value) => setHour12(value)}
+                        style={[styles.picker, styles.pickerThird]}
+                      >
+                        {Array.from({ length: 12 }, (_, i) => i + 1).map((h) => (
+                          <Picker.Item key={h} label={String(h)} value={h} />
+                        ))}
+                      </Picker>
+                    )}
                     <Picker
-                      selectedValue={form.eventHour}
-                      onValueChange={(itemValue) => setForm({ ...form, eventHour: itemValue })}
-                      style={styles.picker}
+                      selectedValue={form.minute}
+                      onValueChange={setPart('minute')}
+                      style={[styles.picker, styles.pickerThird]}
                     >
-                      {hours.map((h) => (
-                        <Picker.Item key={h} label={h} value={h} />
+                      {MINUTES.map((m) => (
+                        <Picker.Item key={m} label={String(m).padStart(2, '0')} value={m} />
                       ))}
                     </Picker>
-                    <Picker
-                      selectedValue={form.eventPeriod}
-                      onValueChange={(itemValue) => setForm({ ...form, eventPeriod: itemValue })}
-                      style={styles.picker}
-                    >
-                      <Picker.Item label="AM" value="AM" />
-                      <Picker.Item label="PM" value="PM" />
-                    </Picker>
+                    {!use24h && (
+                      <Picker
+                        selectedValue={period}
+                        onValueChange={(value) => setHour12(hour12, value)}
+                        style={[styles.picker, styles.pickerThird]}
+                      >
+                        <Picker.Item label="AM" value="AM" />
+                        <Picker.Item label="PM" value="PM" />
+                      </Picker>
+                    )}
                   </View>
                   <TouchableOpacity
                     style={styles.confirmButton}
@@ -432,6 +493,9 @@ const useStyles = makeStyles((COLORS) => ({
     flexDirection: 'row',
     justifyContent: 'space-around',
     width: '100%',
+  },
+  pickerThird: {
+    width: '32%',
   },
   picker: {
     color: COLORS.text,

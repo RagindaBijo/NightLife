@@ -35,7 +35,8 @@
       "expo-font",
       "expo-image",
       "expo-secure-store",
-      "expo-status-bar"
+      "expo-status-bar",
+      "expo-notifications"
     ],
     "experiments": {
       "typedRoutes": true

@@ -28,8 +28,10 @@ import {
 } from "react-native";
 import ImageGallery from "../../../components/ImageGallery";
 import SegmentedTabs from "../../../components/SegmentedTabs";
+import SwipeableTabContent from "../../../components/SwipeableTabContent";
 import { API_URL, api, getSession } from "../../../lib/api";
-import { formatEventTime } from "../../../lib/format";
+import { eventStart, formatEventTime } from "../../../lib/format";
+import { upcomingCutoffMs } from "../../../lib/eventTimes";
 import { useI18n } from "../../../lib/i18n";
 import { takePickedLocation } from "../../../lib/locationPick";
 import { VENUE_TYPES, venueTypeLabel } from "../../../lib/venueTypes";
@@ -166,7 +168,7 @@ function SmallButton({ label, icon, onPress, primary, disabled }) {
 }
 
 /** Card with a text value that switches to an input with Cancel / Save. */
-function EditableCard({ icon, title, value, placeholder, multiline, onSave, onStartEdit }) {
+function EditableCard({ icon, title, value, placeholder, multiline, maxLength, onSave, onStartEdit }) {
   const { colors: COLORS } = useTheme();
   const { t } = useI18n();
   const styles = useStyles();
@@ -205,6 +207,7 @@ function EditableCard({ icon, title, value, placeholder, multiline, onSave, onSt
             placeholderTextColor={COLORS.placeholder}
             selectionColor={COLORS.accent}
             multiline={multiline}
+            maxLength={maxLength}
             autoFocus
           />
           <View style={styles.editActions}>
@@ -479,13 +482,14 @@ export default function VenueProfile() {
 
   const fetchEvents = useCallback(
     (venueId) =>
-      api(`/api/events?venue_id=${venueId}`).then(
+      api(`/api/events?venue_id=${venueId}&include_past=1`).then(
         (data) =>
           setEvents(
             data.map((event, index) => ({
               id: String(event.id),
               title: event.title || t("event.numbered", { number: index + 1 }),
-              time: event.time || "",
+              time: eventStart(event) || "",
+              ended: !!event.starts_at && new Date(event.starts_at).getTime() < upcomingCutoffMs(),
               image: event.photo_id || null,
             })),
           ),
@@ -734,6 +738,7 @@ export default function VenueProfile() {
         title={t("venueProfile.venueName")}
         value={venue.title}
         placeholder={t("venueProfile.venueNamePlaceholder")}
+        maxLength={80}
         onSave={(title) => updateVenue({ title })}
         onStartEdit={scrollToCard}
       />
@@ -771,6 +776,7 @@ export default function VenueProfile() {
         title={t("venueProfile.tonightStatus")}
         value={venue.status}
         placeholder={t("venueProfile.statusPlaceholder")}
+        maxLength={300}
         multiline
         onSave={(status) => updateVenue({ status })}
         onStartEdit={scrollToCard}
@@ -781,6 +787,7 @@ export default function VenueProfile() {
         title={t("venueProfile.about")}
         value={venue.about}
         placeholder={t("venueProfile.aboutPlaceholder")}
+        maxLength={2000}
         multiline
         onSave={(about) => updateVenue({ about })}
         onStartEdit={scrollToCard}
@@ -830,7 +837,10 @@ export default function VenueProfile() {
                 {event.title}
               </Text>
               {!!event.time && (
-                <Text style={styles.eventTime}>{formatEventTime(event.time)}</Text>
+                <Text style={styles.eventTime}>
+                  {formatEventTime(event.time)}
+                  {event.ended ? ` · ${t("event.ended")}` : ""}
+                </Text>
               )}
               <Text style={styles.eventEditHint}>{t("venueProfile.tapToEdit")}</Text>
             </View>
@@ -958,6 +968,15 @@ export default function VenueProfile() {
             </Text>
           </View>
         </Pressable>
+        <Pressable
+          onPress={() => router.push("/protected/settings-folder/settings")}
+          hitSlop={8}
+          style={({ pressed }) => [styles.settingsButton, pressed && styles.pressed]}
+          accessibilityRole="button"
+          accessibilityLabel={t("tabs.settings")}
+        >
+          <MaterialIcons name="settings" size={22} color={COLORS.onImage} />
+        </Pressable>
 
         <View style={styles.content}>
           {/* Visibility */}
@@ -1024,9 +1043,15 @@ export default function VenueProfile() {
             onChange={setSection}
           />
 
-          {section === "details" && renderDetails()}
-          {section === "events" && renderEvents()}
-          {section === "photos" && renderPhotos()}
+          <SwipeableTabContent
+            index={SECTIONS.findIndex((item) => item.key === section)}
+            count={SECTIONS.length}
+            onChange={(index) => setSection(SECTIONS[index].key)}
+          >
+            {section === "details" && renderDetails()}
+            {section === "events" && renderEvents()}
+            {section === "photos" && renderPhotos()}
+          </SwipeableTabContent>
         </View>
         </View>
       </ScrollView>
@@ -1101,6 +1126,17 @@ const useStyles = makeStyles((COLORS) => ({
     right: 16,
     bottom: 14,
     gap: 8,
+  },
+  settingsButton: {
+    position: "absolute",
+    top: 12,
+    right: 12,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(0, 0, 0, 0.45)",
   },
   heroTitle: {
     color: COLORS.text,

@@ -4,15 +4,21 @@ import { useNavigation, useRouter } from "expo-router";
 import { useCallback, useEffect, useState } from "react";
 import {
   ActivityIndicator,
+  Alert,
   FlatList,
   Pressable,
   RefreshControl,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from "react-native";
 import OptionsSheet from "../../components/OptionsSheet";
 import PostCard from "../../components/PostCard";
+import ReportSheet from "../../components/ReportSheet";
+import { api } from "../../lib/api";
+import UserSearchResults from "../../components/UserSearchResults";
+import { openProfile } from "../../lib/openProfile";
 import { useUserType } from "../../lib/session-context";
 import { usePostFeed } from "../../lib/usePostFeed";
 import { useI18n } from "../../lib/i18n";
@@ -28,6 +34,9 @@ export default function Social() {
   const { posts, error, isMine, refreshing, refresh, reload, toggleLike, confirmDelete } =
     usePostFeed();
   const [optionsPost, setOptionsPost] = useState(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [reportTarget, setReportTarget] = useState(null);
+  const searching = searchQuery.trim().length > 0;
 
   useEffect(() => {
     navigation.setOptions({ headerShown: false });
@@ -35,15 +44,96 @@ export default function Social() {
 
   const openCreatePost = () => router.push("/protected/profile-folder/create-post");
 
+  // Tap a post's author: their profile (or a venue's page, or your own profile)
+  const openAuthor = useCallback(
+    (post) =>
+      openProfile(router, { userId: post.user_id, userType: post.user_type, isMine: isMine(post) }),
+    [router, isMine],
+  );
+
   const renderPost = useCallback(
     ({ item }) => (
       <PostCard
         post={item}
         onToggleLike={toggleLike}
-        onOptions={isMine(item) ? setOptionsPost : undefined}
+        onOptions={setOptionsPost}
+        onAuthorPress={openAuthor}
       />
     ),
-    [toggleLike, isMine],
+    [toggleLike, openAuthor],
+  );
+
+  // Block a post's author: their posts disappear from your feed
+  const blockAuthor = (post) => {
+    const name = post.username || t("social.thisUser");
+    Alert.alert(t("block.confirmTitle", { name }), t("block.confirmMessage"), [
+      { text: t("common.cancel"), style: "cancel" },
+      {
+        text: t("block.block"),
+        style: "destructive",
+        onPress: async () => {
+          try {
+            await api(`/api/users/${post.user_id}/block`, { method: "PUT" });
+            reload();
+          } catch (err) {
+            Alert.alert(t("block.error"), err.message);
+          }
+        },
+      },
+    ]);
+  };
+
+  // ⋯ menu: delete your own post, or report / block someone else's
+  const postOptions = !optionsPost
+    ? []
+    : isMine(optionsPost)
+      ? [
+          {
+            label: t("post.deletePost"),
+            icon: "delete-outline",
+            destructive: true,
+            onPress: () => confirmDelete(optionsPost),
+          },
+        ]
+      : [
+          {
+            label: t("report.reportPost"),
+            icon: "flag",
+            onPress: () => setReportTarget({ type: "post", id: optionsPost.id }),
+          },
+          {
+            label: t("block.blockName", { name: optionsPost.username || t("social.thisUser") }),
+            icon: "block",
+            destructive: true,
+            onPress: () => blockAuthor(optionsPost),
+          },
+        ];
+
+  const searchBar = (
+    <View style={styles.searchBar}>
+      <MaterialIcons name="search" size={22} color={COLORS.textSecondary} />
+      <TextInput
+        style={styles.searchInput}
+        value={searchQuery}
+        onChangeText={setSearchQuery}
+        placeholder={t("social.searchPlaceholder")}
+        placeholderTextColor={COLORS.placeholder}
+        selectionColor={COLORS.accent}
+        autoCapitalize="none"
+        autoCorrect={false}
+        returnKeyType="search"
+      />
+      {searching && (
+        <Pressable
+          onPress={() => setSearchQuery("")}
+          hitSlop={10}
+          accessibilityRole="button"
+          accessibilityLabel={t("common.clearSearch")}
+        >
+          <MaterialIcons name="cancel" size={20} color={COLORS.textSecondary} />
+        </Pressable>
+      )}
+    </View>
   );
 
   const header = (
@@ -73,10 +163,25 @@ export default function Social() {
     </View>
   );
 
+  // While searching, people results replace the feed
+  if (searching) {
+    return (
+      <View style={styles.container}>
+        {header}
+        {searchBar}
+        <UserSearchResults
+          query={searchQuery}
+          onSelect={(person) => openProfile(router, { userId: person.id, userType: 1 })}
+        />
+      </View>
+    );
+  }
+
   if (!posts) {
     return (
       <View style={styles.container}>
         {header}
+        {searchBar}
         <View style={styles.centered}>
           {error ? (
             <>
@@ -100,6 +205,7 @@ export default function Social() {
   return (
     <View style={styles.container}>
       {header}
+      {searchBar}
       <FlatList
         data={posts}
         keyExtractor={(post) => String(post.id)}
@@ -136,17 +242,11 @@ export default function Social() {
 
       <OptionsSheet
         visible={!!optionsPost}
-        title={t("post.yourPost")}
+        title={optionsPost && isMine(optionsPost) ? t("post.yourPost") : undefined}
         onClose={() => setOptionsPost(null)}
-        options={[
-          {
-            label: t("post.deletePost"),
-            icon: "delete-outline",
-            destructive: true,
-            onPress: () => confirmDelete(optionsPost),
-          },
-        ]}
+        options={postOptions}
       />
+      <ReportSheet target={reportTarget} onClose={() => setReportTarget(null)} />
     </View>
   );
 }
@@ -179,6 +279,23 @@ const useStyles = makeStyles((COLORS) => ({
     color: COLORS.textSecondary,
     fontSize: 13,
     marginTop: 2,
+  },
+  searchBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    marginHorizontal: 16,
+    marginBottom: 12,
+    paddingHorizontal: 12,
+    height: 44,
+    borderRadius: 14,
+    backgroundColor: COLORS.surface,
+  },
+  searchInput: {
+    flex: 1,
+    height: "100%",
+    color: COLORS.text,
+    fontSize: 15,
   },
   createButton: {
     flexDirection: "row",

@@ -14,6 +14,7 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useI18n } from "../../lib/i18n";
 import { AUTH_COLORS as C } from "./authColors";
+import LanguageButton from "./LanguageButton";
 
 // Soft white radial glow, tinted per use
 const GLOW = require("../../assets/images/auth-glow.png");
@@ -55,7 +56,7 @@ export default function AuthScreen({ children, showBack = false, contentStyle })
         <ScrollView
           contentContainerStyle={[
             styles.content,
-            { paddingTop: insets.top + (showBack ? 56 : 24), paddingBottom: insets.bottom + 24 },
+            { paddingTop: insets.top + 60, paddingBottom: insets.bottom + 24 },
             contentStyle,
           ]}
           keyboardShouldPersistTaps="handled"
@@ -65,6 +66,9 @@ export default function AuthScreen({ children, showBack = false, contentStyle })
           {children}
         </ScrollView>
       </KeyboardAvoidingView>
+
+      {/* Language can be changed before having an account */}
+      <LanguageButton style={[styles.language, { top: insets.top + 8 }]} />
 
       {showBack && (
         <Pressable
@@ -109,6 +113,10 @@ const styles = StyleSheet.create({
     top: 140,
     right: -240,
     opacity: 0.3,
+  },
+  language: {
+    position: "absolute",
+    right: 16,
   },
   back: {
     position: "absolute",

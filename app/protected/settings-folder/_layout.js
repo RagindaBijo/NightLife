@@ -23,6 +23,7 @@ export default function SettingsLayout() {
       <Stack.Screen name="feedback" options={{ title: t('settings.sendFeedback') }} />
       <Stack.Screen name="privacy-policy" options={{ title: t('settings.privacyPolicy') }} />
       <Stack.Screen name="terms-conditions" options={{ title: t('settings.termsOfUse') }} />
+      <Stack.Screen name="blocked" options={{ title: t('settings.blockedAccounts') }} />
     </Stack>
   );
 }

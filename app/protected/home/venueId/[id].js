@@ -16,7 +16,7 @@ import FavoriteStar from "../../../../components/FavoriteStar";
 import ImageGallery from "../../../../components/ImageGallery";
 import SegmentedTabs from "../../../../components/SegmentedTabs";
 import { api, getSession } from "../../../../lib/api";
-import { formatEventTime } from "../../../../lib/format";
+import { eventStart, formatEventTime } from "../../../../lib/format";
 import { favorites } from "../../../../lib/toggles";
 import { venueTypeIcon, venueTypeLabel } from "../../../../lib/venueTypes";
 import { useI18n } from "../../../../lib/i18n";
@@ -133,7 +133,7 @@ export default function VenueDetail() {
             data.map((event, index) => ({
               id: String(event.id),
               title: event.title || t("event.numbered", { number: index + 1 }),
-              time: event.time || "",
+              time: eventStart(event) || "",
               image: event.photo_id || null,
             })),
           );

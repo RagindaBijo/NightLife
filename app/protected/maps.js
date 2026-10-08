@@ -479,7 +479,7 @@ export default function Maps() {
       <Modal
         visible={filtersOpen}
         transparent
-        animationType="slide"
+        animationType="fade"
         onRequestClose={() => setFiltersOpen(false)}
       >
         <View style={styles.sheetBackdrop}>
