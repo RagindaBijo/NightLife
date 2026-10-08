@@ -1,7 +1,9 @@
 import { Image } from 'expo-image';
 import { useNavigation, useRouter } from 'expo-router';
 import { useEffect } from 'react';
-import { SafeAreaView, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { useI18n } from '../../../lib/i18n';
+import { makeStyles } from '../../../lib/theme-context';
 
 const mockChats = [
   { id: 1, userName: 'User1', userImage: 'https://picsum.photos/50/50?random=1', latestMessage: 'Hey, loved your post!', timestamp: '17 Sep' },
@@ -15,6 +17,8 @@ const mockChats = [
 ];
 
 export default function Chat() {
+  const styles = useStyles();
+  const { t } = useI18n();
   const router = useRouter();
   const navigation = useNavigation();
 
@@ -26,9 +30,9 @@ export default function Chat() {
   }, [navigation]);
 
   return (
-    <SafeAreaView style={styles.container} edges={['top']}>
+    <View style={styles.container}>
       <View style={styles.header}>
-        <Text style={styles.headerTitle}>Messages</Text>
+        <Text style={styles.headerTitle}>{t('chat.messages')}</Text>
       </View>
       <ScrollView style={styles.content} contentContainerStyle={{ paddingBottom: 20 }}>
         {mockChats.map(chat => (
@@ -46,32 +50,32 @@ export default function Chat() {
           </TouchableOpacity>
         ))}
       </ScrollView>
-    </SafeAreaView>
+    </View>
   );
 }
 
-const styles = StyleSheet.create({
+const useStyles = makeStyles((COLORS) => ({
   container: {
     flex: 1,
-    backgroundColor: '#121212',
+    backgroundColor: COLORS.background,
   },
   header: {
-    backgroundColor: '#121212',
-    borderBottomColor: '#333333',
+    backgroundColor: COLORS.background,
+    borderBottomColor: COLORS.border,
     paddingVertical: 8,
     paddingHorizontal: 16,
     justifyContent: 'center',
     alignItems: 'center',
   },
   headerTitle: {
-    color: '#FFFFFF',
+    color: COLORS.text,
     fontSize: 20,
     fontWeight: 'bold',
     fontFamily: 'Helvetica Neue',
   },
   content: {
     flex: 1,
-    backgroundColor: '#121212',
+    backgroundColor: COLORS.background,
   },
   chatItem: {
     flexDirection: 'row',
@@ -79,7 +83,7 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     paddingHorizontal: 12,
     borderBottomWidth: 1,
-    borderBottomColor: '#2A2A2A',
+    borderBottomColor: COLORS.surfacePressed,
   },
   userImage: {
     width: 50,
@@ -91,22 +95,22 @@ const styles = StyleSheet.create({
     marginLeft: 12,
   },
   userName: {
-    color: '#FFFFFF',
+    color: COLORS.text,
     fontSize: 14,
     fontWeight: '600',
     fontFamily: 'Helvetica Neue',
   },
   latestMessage: {
-    color: '#B0B0B0',
+    color: COLORS.textSecondary,
     fontSize: 12,
     fontWeight: '400',
     fontFamily: 'Helvetica Neue',
     marginTop: 2,
   },
   timestamp: {
-    color: '#B0B0B0',
+    color: COLORS.textSecondary,
     fontSize: 11,
     fontWeight: '400',
     fontFamily: 'Helvetica Neue',
   },
-});
+}));

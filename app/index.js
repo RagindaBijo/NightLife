@@ -1,7 +1,7 @@
-import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Redirect } from "expo-router";
 import { useEffect, useState } from "react";
 import { ActivityIndicator, View } from "react-native";
+import { api, getSession, saveSession } from "../lib/api";
 
 export default function Index() {
   const [isLoading, setIsLoading] = useState(true);
@@ -11,46 +11,29 @@ export default function Index() {
   useEffect(() => {
     const checkAuth = async () => {
       try {
-        const token = await AsyncStorage.getItem("token");
-        if (!token) {
+        const session = await getSession();
+        if (!session) {
           setIsAuthenticated(false);
-          setIsLoading(false);
           return;
         }
 
-        // Fetch user data from /api/login/:id
-        const userId = await AsyncStorage.getItem("userId");
-        if (!userId) {
-          setIsAuthenticated(false);
-          setIsLoading(false);
-          return;
-        }
-
-        const response = await fetch(
-          `https://night-life-api.elevator-rand.workers.dev/api/login/${userId}`,
-          {
-            headers: {
-              Authorization: `Bearer ${token}`,
-              "Content-Type": "application/json",
-            },
-          },
-        );
-
-        if (response.ok) {
-          const data = await response.json();
-          if (data.user_type) {
-            setUserType(data.user_type);
-            await AsyncStorage.setItem("userType", data.user_type.toString());
-            setIsAuthenticated(true);
-          } else {
-            setIsAuthenticated(false);
-          }
+        // Fetch user data from /api/login/:id (a 401 signs the user out)
+        const data = await api(`/api/login/${session.userId}`);
+        if (data.user_type) {
+          setUserType(data.user_type);
+          await saveSession({ ...session, userType: data.user_type });
+          setIsAuthenticated(true);
         } else {
           setIsAuthenticated(false);
         }
       } catch (error) {
-        console.error("Auth check failed:", error);
-        setIsAuthenticated(false);
+        // Offline: stay logged in with the saved session
+        if (error.status === 0) {
+          setIsAuthenticated(true);
+        } else {
+          console.error("Auth check failed:", error.message);
+          setIsAuthenticated(false);
+        }
       } finally {
         setIsLoading(false);
       }

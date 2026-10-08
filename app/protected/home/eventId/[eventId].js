@@ -1,533 +1,414 @@
-import { FontAwesome } from "@expo/vector-icons";
-import AsyncStorage from "@react-native-async-storage/async-storage";
-import { createMaterialTopTabNavigator } from "@react-navigation/material-top-tabs";
+import { MaterialIcons } from "@expo/vector-icons";
 import { Image } from "expo-image";
-import { useLocalSearchParams, useNavigation } from "expo-router";
-import { useEffect, useState } from "react";
+import { LinearGradient } from "expo-linear-gradient";
+import { useLocalSearchParams, useNavigation, useRouter } from "expo-router";
+import { useCallback, useEffect, useState } from "react";
 import {
-  Dimensions,
-  FlatList,
-  Modal,
+  ActivityIndicator,
+  Pressable,
+  ScrollView,
   StyleSheet,
   Text,
-  TouchableOpacity,
   View,
 } from "react-native";
+import ImageGallery from "../../../../components/ImageGallery";
+import InterestCheck from "../../../../components/InterestCheck";
+import SegmentedTabs from "../../../../components/SegmentedTabs";
+import { api, getSession } from "../../../../lib/api";
+import { formatEventTime, parseEventTime } from "../../../../lib/format";
+import { interests } from "../../../../lib/toggles";
+import { useI18n } from "../../../../lib/i18n";
+import { makeStyles, useTheme } from "../../../../lib/theme-context";
 
-const Tab = createMaterialTopTabNavigator();
+const SECTIONS = [
+  { key: "details", labelKey: "event.details" },
+  { key: "tickets", labelKey: "event.tickets" },
+];
 
 export default function EventDetail() {
+  const { colors: COLORS } = useTheme();
+  const { t } = useI18n();
+  const styles = useStyles();
   const { eventId } = useLocalSearchParams();
   const navigation = useNavigation();
+  const router = useRouter();
   const [event, setEvent] = useState(null);
   const [venue, setVenue] = useState(null);
-  const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [userType, setUserType] = useState(null);
-  const [isImageModalVisible, setIsImageModalVisible] = useState(false);
-  const [activeIndex, setActiveIndex] = useState(0);
-  const apiUrl = "https://night-life-api.elevator-rand.workers.dev";
-  const IMAGE_DOMAIN =
-    "https://night-life-api.elevator-rand.workers.dev/images";
+  const [section, setSection] = useState("details");
+  const [galleryVisible, setGalleryVisible] = useState(false);
 
   useEffect(() => {
-    navigation.setOptions({
-      headerShown: false,
-    });
+    navigation.setOptions({ headerShown: false });
   }, [navigation]);
 
-  useEffect(() => {
-    const fetchEventAndVenue = async () => {
-      try {
-        setLoading(true);
-        setError(null);
-        const token = await AsyncStorage.getItem("token");
-        const storedUserType = await AsyncStorage.getItem("userType");
-        setUserType(storedUserType);
-
-        if (!token) {
-          setError("Authentication token not found. Please log in.");
-          return;
-        }
-
-        const eventResponse = await fetch(`${apiUrl}/api/events/${eventId}`, {
-          method: "GET",
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
-          },
-        });
-
-        if (!eventResponse.ok) {
-          throw new Error(`Failed to fetch event: ${eventResponse.status}`);
-        }
-
-        const eventData = await eventResponse.json();
-        if (eventData.error) {
-          throw new Error(eventData.error);
-        }
-
-        console.log("Event data:", eventData); // Debug log to verify photo_id
-
-        // Use photo_id from API (already includes IMAGE_DOMAIN)
-        const image = eventData.photo_id || `${IMAGE_DOMAIN}/placeholder.jpg`;
-
-        setEvent({
-          id: eventData.id ? String(eventData.id) : String(eventId),
-          title: eventData.title || "Untitled Event",
-          about: eventData.about || "No description provided",
-          time: eventData.time || "No time provided",
-          venue_id: eventData.venue_id,
-          images: [image], // Single image array
-        });
-
-        if (!eventData.venue_id) {
-          console.warn("No venue_id found for this event");
-          setVenue({
-            title: "Unknown",
-            address: "No address provided",
-            about: "No description provided",
+  const fetchEvent = useCallback(
+    () =>
+      Promise.all([getSession(), api(`/api/events/${eventId}`)])
+        .then(async ([session, eventData]) => {
+          interests.seed([eventData], "is_interested");
+          setUserType(session?.userType ?? null);
+          setEvent({
+            id: String(eventData.id ?? eventId),
+            title: eventData.title || t("event.untitled"),
+            about: eventData.about || t("event.noDescription"),
+            time: eventData.time || t("event.noTime"),
+            venueId: eventData.venue_id,
+            // photo_id is a full URL from the API
+            images: eventData.photo_id ? [eventData.photo_id] : [],
           });
-          return;
-        }
+          setError(null);
 
-        const venueResponse = await fetch(
-          `${apiUrl}/api/venue/${eventData.venue_id}`,
-          {
-            method: "GET",
-            headers: {
-              Authorization: `Bearer ${token}`,
-              "Content-Type": "application/json",
-            },
-          },
-        );
-
-        if (!venueResponse.ok) {
-          console.warn(
-            `Failed to fetch venue ${eventData.venue_id}: ${venueResponse.status}`,
-          );
-          setVenue({
-            title: "Unknown",
-            address: "No address provided",
-            about: "No description provided",
-          });
-          return;
-        }
-
-        const venueData = await venueResponse.json();
-        if (venueData.error) {
-          console.warn(`Venue data error: ${venueData.error}`);
-          setVenue({
-            title: "Unknown",
-            address: "No address provided",
-            about: "No description provided",
-          });
-          return;
-        }
-
-        setVenue(venueData);
-      } catch (err) {
-        console.error("Error fetching event or venue:", err);
-        setError("Failed to load event details. Please try again.");
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    if (eventId) {
-      fetchEventAndVenue();
-    } else {
-      setError("No event ID provided");
-      setLoading(false);
-    }
-  }, [eventId]);
-
-  const openImageModal = () => {
-    if (!event.images || event.images.length === 0) {
-      console.log("No images to display in modal");
-      return;
-    }
-    console.log("Image pressed, opening modal");
-    setActiveIndex(0);
-    setIsImageModalVisible(true);
-  };
-
-  const closeImageModal = () => {
-    console.log("Modal closed");
-    setIsImageModalVisible(false);
-  };
-
-  if (loading) {
-    return (
-      <View style={styles.container}>
-        <Text style={styles.errorText}>Loading event...</Text>
-      </View>
-    );
-  }
-
-  if (error || !event) {
-    return (
-      <View style={styles.container}>
-        <Text style={styles.errorText}>{error || "Event not found"}</Text>
-      </View>
-    );
-  }
-
-  const DetailsScreen = () => (
-    <View style={styles.tabContent}>
-      <View style={styles.detailItem}>
-        <Text style={styles.tabContentLabel}>About:</Text>
-        <Text style={styles.tabContentValue}>{event.about}</Text>
-      </View>
-    </View>
-  );
-
-  const TicketsScreen = () => (
-    <View style={styles.tabContent}>
-      <Text style={styles.tabContentText}>Tickets Coming Soon</Text>
-    </View>
-  );
-
-  function CheckIcon() {
-    const [isActive, setIsActive] = useState(false);
-    const [interestedIds, setInterestedIds] = useState([]);
-
-    useEffect(() => {
-      const fetchUserInterested = async () => {
-        try {
-          const token = await AsyncStorage.getItem("token");
-          const userId = await AsyncStorage.getItem("userId");
-          if (!token || !userId) return;
-
-          const response = await fetch(`${apiUrl}/api/user/${userId}`, {
-            method: "GET",
-            headers: {
-              Authorization: `Bearer ${token}`,
-              "Content-Type": "application/json",
-            },
-          });
-
-          if (response.ok) {
-            const data = await response.json();
-            const ids = data.interested_ids
-              ? data.interested_ids
-                  .split(",")
-                  .map((id) => id.trim())
-                  .filter(Boolean)
-              : [];
-            setInterestedIds(ids);
-            setIsActive(ids.includes(String(eventId)));
+          if (eventData.venue_id) {
+            try {
+              setVenue(await api(`/api/venue/${eventData.venue_id}`));
+            } catch (err) {
+              console.warn(`Failed to fetch venue ${eventData.venue_id}: ${err.message}`);
+            }
           }
-        } catch (error) {
-          console.error("Error fetching user interested_ids:", error);
-        }
-      };
+        })
+        .catch((err) => {
+          console.error("Error fetching event or venue:", err.message);
+          setError(
+            err.status === 0
+              ? t("common.cantConnect")
+              : t("event.loadError"),
+          );
+        }),
+    [eventId, t],
+  );
 
-      fetchUserInterested();
-    }, [eventId]);
+  useEffect(() => {
+    fetchEvent();
+  }, [fetchEvent]);
 
-    const toggleCheck = async () => {
-      try {
-        const token = await AsyncStorage.getItem("token");
-        const userId = await AsyncStorage.getItem("userId");
-        if (!token || !userId) return;
+  const backButton = (
+    <Pressable
+      onPress={() => router.back()}
+      hitSlop={8}
+      style={({ pressed }) => [styles.roundButton, styles.backButton, pressed && styles.pressed]}
+      accessibilityRole="button"
+      accessibilityLabel={t("common.goBack")}
+    >
+      <MaterialIcons name="arrow-back" size={24} color={COLORS.onImage} />
+    </Pressable>
+  );
 
-        const newIds = isActive
-          ? interestedIds.filter((id) => id !== String(eventId))
-          : [...interestedIds, String(eventId)];
-
-        const newInterestedStr = newIds.join(",");
-
-        const response = await fetch(`${apiUrl}/api/user/${userId}`, {
-          method: "PUT",
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            interested_ids: newInterestedStr,
-          }),
-        });
-
-        if (response.ok) {
-          setInterestedIds(newIds);
-          setIsActive(!isActive);
-        }
-      } catch (error) {
-        console.error("Error toggling check:", error);
-      }
-    };
-
+  if (!event) {
     return (
-      <TouchableOpacity onPress={toggleCheck} style={styles.checkContainer}>
-        <FontAwesome
-          name="check-square"
-          size={32}
-          color={isActive ? "#0000FF" : "#808080"}
-        />
-      </TouchableOpacity>
+      <View style={styles.centered}>
+        {error ? (
+          <>
+            <MaterialIcons name="cloud-off" size={48} color={COLORS.textSecondary} />
+            <Text style={styles.messageText}>{error}</Text>
+            <Pressable
+              onPress={fetchEvent}
+              style={({ pressed }) => [styles.retryButton, pressed && styles.pressed]}
+            >
+              <Text style={styles.retryButtonText}>{t("common.tryAgain")}</Text>
+            </Pressable>
+          </>
+        ) : (
+          <ActivityIndicator size="large" color={COLORS.accent} />
+        )}
+        {backButton}
+      </View>
     );
   }
 
-  const renderImageItem = ({ item }) => (
-    <View style={styles.imageItem}>
-      <Image
-        source={{ uri: item }}
-        style={styles.fullScreenImage}
-        contentFit="contain"
-        placeholder={{ uri: `${IMAGE_DOMAIN}/placeholder.jpg` }}
-        onError={(e) => console.log("Image load error:", e.nativeEvent.error)}
-      />
-    </View>
-  );
+  const when = parseEventTime(event.time);
 
   return (
     <View style={styles.container}>
-      <View style={styles.eventImageContainer}>
-        <TouchableOpacity
-          onPress={openImageModal}
-          activeOpacity={0.8}
-          style={styles.imageWrapper}
-          accessibilityLabel="View event image full screen"
+      <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
+        {/* Hero */}
+        <Pressable
+          onPress={() => event.images.length > 0 && setGalleryVisible(true)}
+          style={styles.hero}
+          accessibilityRole="imagebutton"
+          accessibilityLabel={t("event.viewPhoto")}
         >
-          <Image
-            source={{ uri: event.images[0] }}
-            style={styles.eventImage}
-            contentFit="cover"
-            placeholder={{ uri: `${IMAGE_DOMAIN}/placeholder.jpg` }}
-            onError={(e) =>
-              console.log("Image load error:", e.nativeEvent.error)
-            }
-          />
-        </TouchableOpacity>
-        <View style={styles.textContainer}>
-          <View style={styles.textContent}>
-            <Text style={styles.eventTitle}>{event.title}</Text>
-            <Text style={styles.eventBody}>{venue?.title || "Unknown"}</Text>
-            <Text style={styles.eventTime}>{event.time}</Text>
-          </View>
-          {userType === "1" && <CheckIcon />}
-        </View>
-      </View>
-      <Modal
-        visible={isImageModalVisible}
-        transparent={true}
-        animationType="fade"
-        onRequestClose={closeImageModal}
-      >
-        <View style={styles.modalContainer}>
-          <FlatList
-            data={event.images}
-            renderItem={renderImageItem}
-            keyExtractor={(item, index) => index.toString()}
-            horizontal
-            pagingEnabled
-            showsHorizontalScrollIndicator={false}
-            onMomentumScrollEnd={(e) => {
-              const index = Math.round(
-                e.nativeEvent.contentOffset.x / Dimensions.get("window").width,
-              );
-              setActiveIndex(index);
-              console.log("Swiped to image index:", index);
-            }}
-          />
-          {event.images.length > 1 && (
-            <View style={styles.dotsContainer}>
-              {event.images.map((_, i) => (
-                <View
-                  key={i}
-                  style={[
-                    styles.dot,
-                    i === activeIndex ? styles.activeDot : null,
-                  ]}
-                />
-              ))}
+          {event.images.length > 0 ? (
+            <Image source={{ uri: event.images[0] }} style={styles.heroImage} contentFit="cover" transition={250} />
+          ) : (
+            <View style={[styles.heroImage, styles.heroPlaceholder]}>
+              <MaterialIcons name="event" size={56} color={COLORS.textSecondary} />
             </View>
           )}
-          <TouchableOpacity
-            style={styles.closeButton}
-            onPress={closeImageModal}
-          >
-            <Text style={styles.closeButtonText}>✕</Text>
-          </TouchableOpacity>
+          <LinearGradient
+            colors={["transparent", COLORS.background]}
+            style={styles.heroGradient}
+            pointerEvents="none"
+          />
+          {when && (
+            <View style={styles.dateBadge}>
+              <Text style={styles.dateDay}>{when.day}</Text>
+              <Text style={styles.dateMonth}>{when.month}</Text>
+            </View>
+          )}
+        </Pressable>
+
+        {/* Details */}
+        <View style={styles.content}>
+          <Text style={styles.title}>{event.title}</Text>
+
+          <View style={styles.infoCard}>
+            {event.venueId ? (
+              <Pressable
+                onPress={() => router.push(`/protected/home/venueId/${event.venueId}`)}
+                style={({ pressed }) => [styles.infoRow, pressed && styles.infoRowPressed]}
+                accessibilityRole="button"
+                accessibilityLabel={t("event.openVenue", { name: venue?.title ?? "" })}
+              >
+                <View style={styles.infoIcon}>
+                  <MaterialIcons name="storefront" size={20} color={COLORS.accent} />
+                </View>
+                <View style={styles.infoText}>
+                  <Text style={styles.infoLabel}>{t("event.venue")}</Text>
+                  <Text style={styles.infoValue} numberOfLines={1}>
+                    {venue?.title || t("event.unknownVenue")}
+                  </Text>
+                </View>
+                <MaterialIcons name="chevron-right" size={22} color={COLORS.textSecondary} />
+              </Pressable>
+            ) : null}
+            <View style={[styles.infoRow, event.venueId && styles.infoRowDivider]}>
+              <View style={styles.infoIcon}>
+                <MaterialIcons name="schedule" size={20} color={COLORS.accent} />
+              </View>
+              <View style={styles.infoText}>
+                <Text style={styles.infoLabel}>{t("event.when")}</Text>
+                <Text style={styles.infoValue}>{formatEventTime(event.time)}</Text>
+              </View>
+            </View>
+          </View>
+
+          <SegmentedTabs
+            tabs={SECTIONS.map((item) => ({ key: item.key, label: t(item.labelKey) }))}
+            value={section}
+            onChange={setSection}
+          />
+
+          {section === "details" ? (
+            <View style={styles.sectionCard}>
+              <Text style={styles.sectionTitle}>{t("event.aboutTitle")}</Text>
+              <Text style={styles.sectionText}>{event.about}</Text>
+            </View>
+          ) : (
+            <View style={[styles.sectionCard, styles.sectionCardCentered]}>
+              <MaterialIcons name="confirmation-number" size={36} color={COLORS.accent} />
+              <Text style={styles.sectionTitle}>{t("event.ticketsSoon")}</Text>
+              <Text style={[styles.sectionText, styles.centeredText]}>
+                {t("event.ticketsSoonText")}
+              </Text>
+            </View>
+          )}
         </View>
-      </Modal>
-      <Tab.Navigator
-        screenOptions={{
-          tabBarPosition: "top",
-          tabBarStyle: {
-            backgroundColor: "#121212",
-            borderBottomColor: "#333333",
-          },
-          tabBarLabelStyle: {
-            fontSize: 16,
-            fontWeight: "bold",
-            color: "#FFFFFF",
-          },
-          tabBarActiveTintColor: "#BB86FC",
-          tabBarInactiveTintColor: "#8E8E93",
-          tabBarIndicatorStyle: {
-            backgroundColor: "#BB86FC",
-          },
-        }}
-      >
-        <Tab.Screen
-          name="Details"
-          component={DetailsScreen}
-          options={{ title: "Details" }}
-        />
-        <Tab.Screen
-          name="Tickets"
-          component={TicketsScreen}
-          options={{ title: "Tickets" }}
-        />
-      </Tab.Navigator>
+      </ScrollView>
+
+      {backButton}
+      {userType === "1" && (
+        <View style={[styles.roundButton, styles.actionButton]}>
+          <InterestCheck
+            eventId={event.id}
+            size={22}
+            activeColor={COLORS.accent}
+            inactiveColor={COLORS.onImage}
+            style={styles.roundTouch}
+          />
+        </View>
+      )}
+
+      <ImageGallery
+        images={event.images}
+        visible={galleryVisible}
+        onClose={() => setGalleryVisible(false)}
+      />
     </View>
   );
 }
 
-const styles = StyleSheet.create({
+const useStyles = makeStyles((COLORS) => ({
   container: {
     flex: 1,
-    backgroundColor: "#121212",
+    backgroundColor: COLORS.background,
   },
-  eventImageContainer: {
-    height: 200,
-    width: "100%",
-    borderWidth: 1,
-    borderColor: "#333333",
-    position: "relative",
-  },
-  imageWrapper: {
+  centered: {
     flex: 1,
+    backgroundColor: COLORS.background,
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 24,
   },
-  eventImage: {
-    ...StyleSheet.absoluteFillObject,
-    zIndex: 1,
+  scrollContent: {
+    paddingBottom: 32,
   },
-  textContainer: {
+  pressed: {
+    opacity: 0.6,
+  },
+
+  // Floating buttons
+  roundButton: {
     position: "absolute",
-    bottom: 0,
+    top: 12,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: "rgba(0, 0, 0, 0.5)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  backButton: {
+    left: 12,
+  },
+  actionButton: {
+    right: 12,
+  },
+  roundTouch: {
+    width: 44,
+    height: 44,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  // Hero
+  hero: {
+    width: "100%",
+    aspectRatio: 4 / 3,
+  },
+  heroImage: {
+    width: "100%",
+    height: "100%",
+  },
+  heroPlaceholder: {
+    backgroundColor: COLORS.surface,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  heroGradient: {
+    position: "absolute",
     left: 0,
     right: 0,
-    padding: 10,
-    backgroundColor: "rgba(0, 0, 0, 0.3)",
-    zIndex: 2,
-    justifyContent: "flex-end",
+    bottom: 0,
+    height: "40%",
   },
-  textContent: {
-    alignSelf: "flex-start",
-  },
-  checkContainer: {
+  dateBadge: {
     position: "absolute",
-    right: 10,
-    bottom: 10,
-    zIndex: 3,
+    left: 16,
+    bottom: 16,
+    minWidth: 58,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    borderRadius: 14,
+    backgroundColor: "rgba(14, 11, 22, 0.9)",
+    alignItems: "center",
   },
-  eventTitle: {
+  dateDay: {
+    color: COLORS.onImage,
     fontSize: 24,
-    fontWeight: "bold",
-    color: "#FFFFFF",
-    textShadowColor: "rgba(0, 0, 0, 0.75)",
-    textShadowOffset: { width: -1, height: 1 },
-    textShadowRadius: 2,
+    fontWeight: "800",
+    lineHeight: 26,
   },
-  eventBody: {
-    fontSize: 16,
-    color: "#E0E0E0",
-    marginTop: 5,
-    textShadowColor: "rgba(0, 0, 0, 0.75)",
-    textShadowOffset: { width: -1, height: 1 },
-    textShadowRadius: 2,
+  dateMonth: {
+    color: COLORS.accent,
+    fontSize: 13,
+    fontWeight: "700",
+    letterSpacing: 1,
   },
-  eventTime: {
-    fontSize: 16,
-    color: "#E0E0E0",
-    marginTop: 5,
-    textShadowColor: "rgba(0, 0, 0, 0.75)",
-    textShadowOffset: { width: -1, height: 1 },
-    textShadowRadius: 2,
+
+  // Content
+  content: {
+    paddingHorizontal: 16,
+    gap: 16,
   },
-  tabContent: {
-    flex: 1,
-    padding: 20,
-    backgroundColor: "#121212",
+  title: {
+    color: COLORS.text,
+    fontSize: 28,
+    fontWeight: "800",
+    marginTop: 4,
   },
-  tabContentLabel: {
-    fontSize: 20,
-    fontWeight: "bold",
-    color: "#FFFFFF",
-    marginBottom: 5,
+  infoCard: {
+    backgroundColor: COLORS.surface,
+    borderRadius: 16,
+    overflow: "hidden",
   },
-  tabContentValue: {
-    fontSize: 16,
-    color: "#E0E0E0",
-    paddingLeft: 10,
-    marginBottom: 15,
-    flexWrap: "wrap",
-  },
-  tabContentText: {
-    fontSize: 18,
-    color: "#FFFFFF",
-  },
-  detailItem: {
-    marginBottom: 10,
-  },
-  errorText: {
-    fontSize: 18,
-    color: "#FFFFFF",
-    textAlign: "center",
-    marginTop: 20,
-  },
-  modalContainer: {
-    flex: 1,
-    backgroundColor: "rgba(0, 0, 0, 0.9)",
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  imageItem: {
-    width: Dimensions.get("window").width,
-    height: Dimensions.get("window").height * 0.8,
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  fullScreenImage: {
-    width: "90%",
-    height: "100%",
-    borderRadius: 10,
-  },
-  dotsContainer: {
+  infoRow: {
     flexDirection: "row",
-    position: "absolute",
-    bottom: 20,
-    alignSelf: "center",
-  },
-  dot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: "#888888",
-    marginHorizontal: 4,
-  },
-  activeDot: {
-    backgroundColor: "#FFFFFF",
-  },
-  closeButton: {
-    position: "absolute",
-    top: 40,
-    right: 20,
-    backgroundColor: "#FFFFFF",
-    borderRadius: 20,
-    width: 40,
-    height: 40,
-    justifyContent: "center",
     alignItems: "center",
-    borderWidth: 1,
-    borderColor: "#BB86FC",
+    paddingVertical: 12,
+    paddingHorizontal: 14,
   },
-  closeButtonText: {
-    fontSize: 24,
-    color: "#BB86FC",
-    fontWeight: "bold",
+  infoRowPressed: {
+    backgroundColor: COLORS.surfacePressed,
   },
-});
+  infoRowDivider: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: COLORS.surfacePressed,
+  },
+  infoIcon: {
+    width: 38,
+    height: 38,
+    borderRadius: 12,
+    backgroundColor: "rgba(167, 139, 250, 0.12)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  infoText: {
+    flex: 1,
+    marginLeft: 12,
+  },
+  infoLabel: {
+    color: COLORS.textSecondary,
+    fontSize: 12,
+  },
+  infoValue: {
+    color: COLORS.text,
+    fontSize: 16,
+    fontWeight: "600",
+    marginTop: 1,
+  },
+  sectionCard: {
+    backgroundColor: COLORS.surface,
+    borderRadius: 16,
+    padding: 16,
+    gap: 8,
+  },
+  sectionCardCentered: {
+    alignItems: "center",
+    paddingVertical: 28,
+  },
+  sectionTitle: {
+    color: COLORS.text,
+    fontSize: 17,
+    fontWeight: "700",
+  },
+  sectionText: {
+    color: COLORS.textSecondary,
+    fontSize: 15,
+    lineHeight: 22,
+  },
+  centeredText: {
+    textAlign: "center",
+  },
+
+  // Error
+  messageText: {
+    color: COLORS.textSecondary,
+    fontSize: 15,
+    textAlign: "center",
+    marginTop: 12,
+  },
+  retryButton: {
+    marginTop: 16,
+    backgroundColor: COLORS.surface,
+    borderRadius: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 20,
+  },
+  retryButtonText: {
+    color: COLORS.text,
+    fontSize: 14,
+    fontWeight: "600",
+  },
+}));

@@ -1,307 +1,246 @@
-import { FontAwesome } from "@expo/vector-icons";
-import AsyncStorage from "@react-native-async-storage/async-storage";
-import { Image } from "expo-image";
-import { useNavigation } from "expo-router";
-import { useEffect, useState } from "react";
+import { MaterialIcons } from "@expo/vector-icons";
+import { LinearGradient } from "expo-linear-gradient";
+import { useNavigation, useRouter } from "expo-router";
+import { useCallback, useEffect, useState } from "react";
 import {
-  Alert,
-  SafeAreaView,
-  ScrollView,
+  ActivityIndicator,
+  FlatList,
+  Pressable,
+  RefreshControl,
   StyleSheet,
   Text,
-  TouchableOpacity,
   View,
 } from "react-native";
+import OptionsSheet from "../../components/OptionsSheet";
+import PostCard from "../../components/PostCard";
+import { useUserType } from "../../lib/session-context";
+import { usePostFeed } from "../../lib/usePostFeed";
+import { useI18n } from "../../lib/i18n";
+import { makeStyles, useTheme } from "../../lib/theme-context";
 
 export default function Social() {
+  const { colors: COLORS, gradients: GRADIENTS } = useTheme();
+  const { t } = useI18n();
+  const styles = useStyles();
   const navigation = useNavigation();
-  const [posts, setPosts] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const apiUrl = "https://night-life-api.elevator-rand.workers.dev";
+  const router = useRouter();
+  const isUser = useUserType() === "1";
+  const { posts, error, isMine, refreshing, refresh, reload, toggleLike, confirmDelete } =
+    usePostFeed();
+  const [optionsPost, setOptionsPost] = useState(null);
 
   useEffect(() => {
-    // Hide the default navigation header to avoid duplication
-    navigation.setOptions({
-      headerShown: false,
-    });
+    navigation.setOptions({ headerShown: false });
   }, [navigation]);
 
-  const fetchPosts = async () => {
-    try {
-      setLoading(true);
-      const token = await AsyncStorage.getItem("token");
-      if (!token) {
-        Alert.alert("Error", "Authentication required. Please log in.");
-        return;
-      }
-      const response = await fetch(`${apiUrl}/api/posts`, {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-      });
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        console.error("Fetch posts error:", errorData);
-        Alert.alert("Error", errorData.error || "Failed to fetch posts.");
-        return;
-      }
-      const data = await response.json();
-      setPosts(data);
-    } catch (err) {
-      console.error("Fetch posts error:", err);
-      Alert.alert(
-        "Error",
-        "Failed to fetch posts due to a network or server issue.",
-      );
-    } finally {
-      setLoading(false);
-    }
-  };
+  const openCreatePost = () => router.push("/protected/profile-folder/create-post");
 
-  const toggleLike = async (postId) => {
-    try {
-      const token = await AsyncStorage.getItem("token");
-      const userId = await AsyncStorage.getItem("userId");
-      if (!token || !userId) {
-        Alert.alert("Error", "Authentication required. Please log in.");
-        return;
-      }
-      const post = posts.find((p) => p.id === postId);
-      if (!post) return;
-      const likeIds = post.like_ids
-        ? post.like_ids.split(",").filter((id) => id)
-        : [];
-      const isLiked = likeIds.includes(userId);
-      const updatedLikeIds = isLiked
-        ? likeIds.filter((id) => id !== userId).join(",")
-        : [...likeIds, userId].join(",");
-      const response = await fetch(`${apiUrl}/api/posts/${postId}/like`, {
-        method: "PUT",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ like_ids: updatedLikeIds }),
-      });
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        console.error("Toggle like error:", errorData);
-        Alert.alert("Error", errorData.error || "Failed to update like.");
-        return;
-      }
-      setPosts((prev) =>
-        prev.map((p) =>
-          p.id === postId
-            ? {
-                ...p,
-                like_ids: updatedLikeIds,
-                likes: updatedLikeIds
-                  ? updatedLikeIds.split(",").filter((id) => id).length
-                  : 0,
-                isLiked: !isLiked,
-              }
-            : p,
-        ),
-      );
-    } catch (err) {
-      console.error("Toggle like error:", err);
-      Alert.alert(
-        "Error",
-        "Failed to update like due to a network or server issue.",
-      );
-    }
-  };
+  const renderPost = useCallback(
+    ({ item }) => (
+      <PostCard
+        post={item}
+        onToggleLike={toggleLike}
+        onOptions={isMine(item) ? setOptionsPost : undefined}
+      />
+    ),
+    [toggleLike, isMine],
+  );
 
-  const formatDate = (dateString) => {
-    const date = new Date(dateString);
-    const day = date.getDate();
-    const month = date.toLocaleString("default", { month: "short" });
-    return `${day} ${month}`;
-  };
+  const header = (
+    <View style={styles.header}>
+      <View style={styles.headerText}>
+        <Text style={styles.title}>{t("social.title")}</Text>
+        <Text style={styles.subtitle}>{t("social.subtitle")}</Text>
+      </View>
+      {isUser && (
+        <Pressable
+          onPress={openCreatePost}
+          style={({ pressed }) => pressed && styles.pressed}
+          accessibilityRole="button"
+          accessibilityLabel={t("social.createPost")}
+        >
+          <LinearGradient
+            colors={GRADIENTS.brand}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
+            style={styles.createButton}
+          >
+            <MaterialIcons name="add" size={20} color={COLORS.onImage} />
+            <Text style={styles.createText}>{t("social.post")}</Text>
+          </LinearGradient>
+        </Pressable>
+      )}
+    </View>
+  );
 
-  useEffect(() => {
-    fetchPosts();
-  }, []);
-
-  if (loading) {
+  if (!posts) {
     return (
-      <SafeAreaView style={styles.container} edges={["top"]}>
-        <View style={styles.header}>
-          <Text style={styles.headerTitle}>Social</Text>
+      <View style={styles.container}>
+        {header}
+        <View style={styles.centered}>
+          {error ? (
+            <>
+              <MaterialIcons name="cloud-off" size={48} color={COLORS.textSecondary} />
+              <Text style={styles.message}>{error}</Text>
+              <Pressable
+                onPress={reload}
+                style={({ pressed }) => [styles.retryButton, pressed && styles.pressed]}
+              >
+                <Text style={styles.retryText}>{t("common.tryAgain")}</Text>
+              </Pressable>
+            </>
+          ) : (
+            <ActivityIndicator size="large" color={COLORS.accent} />
+          )}
         </View>
-        <View style={styles.content}>
-          <Text style={styles.loadingText}>Loading posts...</Text>
-        </View>
-      </SafeAreaView>
+      </View>
     );
   }
 
   return (
-    <SafeAreaView style={styles.container} edges={["top"]}>
-      <View style={styles.header}>
-        <Text style={styles.headerTitle}>Social</Text>
-      </View>
-      <ScrollView
-        style={styles.content}
-        contentContainerStyle={{ paddingBottom: 20 }}
-      >
-        {posts.length === 0 ? (
-          <Text style={styles.noPostsText}>No posts available.</Text>
-        ) : (
-          posts.map((post) => (
-            <View key={post.id} style={styles.postContainer}>
-              <View style={styles.postHeader}>
-                <Image
-                  source={{ uri: post.user_image }}
-                  style={styles.userImage}
-                  contentFit="cover"
-                />
-                <Text style={styles.userName}>
-                  {post.username || `User${post.user_id}`}
-                </Text>
-              </View>
-              <View style={styles.imageContainer}>
-                <Image
-                  source={{ uri: post.post_image }}
-                  style={styles.postImage}
-                  contentFit="cover"
-                />
-                <Text style={styles.caption}>
-                  <Text style={styles.captionUser}>
-                    {post.username || `User${post.user_id}`}
-                  </Text>{" "}
-                  {post.caption}
-                </Text>
-              </View>
-              <View style={styles.footer}>
-                <View style={styles.likeContainer}>
-                  <TouchableOpacity
-                    onPress={() => toggleLike(post.id)}
-                    style={styles.likeButton}
-                  >
-                    <FontAwesome
-                      name={post.isLiked ? "heart" : "heart-o"}
-                      size={20}
-                      color={post.isLiked ? "#FF4D4D" : "#B0B0B0"}
-                    />
-                  </TouchableOpacity>
-                  <Text style={styles.likeCount}>
-                    {post.likes} {post.likes === 1 ? "like" : "likes"}
-                  </Text>
-                </View>
-                <Text style={styles.postDate}>{formatDate(post.date)}</Text>
-              </View>
+    <View style={styles.container}>
+      {header}
+      <FlatList
+        data={posts}
+        keyExtractor={(post) => String(post.id)}
+        renderItem={renderPost}
+        contentContainerStyle={posts.length === 0 ? styles.emptyContainer : styles.list}
+        ItemSeparatorComponent={() => <View style={styles.separator} />}
+        showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={refresh}
+            tintColor={COLORS.accent}
+            colors={[COLORS.accent]}
+          />
+        }
+        ListEmptyComponent={
+          <View style={styles.centered}>
+            <View style={styles.emptyIcon}>
+              <MaterialIcons name="photo-camera" size={34} color={COLORS.accent} />
             </View>
-          ))
-        )}
-      </ScrollView>
-    </SafeAreaView>
+            <Text style={styles.emptyTitle}>{t("social.noPosts")}</Text>
+            <Text style={styles.message}>{t("social.noPostsHint")}</Text>
+            {isUser && (
+              <Pressable
+                onPress={openCreatePost}
+                style={({ pressed }) => [styles.retryButton, pressed && styles.pressed]}
+              >
+                <Text style={styles.retryText}>{t("social.createAPost")}</Text>
+              </Pressable>
+            )}
+          </View>
+        }
+      />
+
+      <OptionsSheet
+        visible={!!optionsPost}
+        title={t("post.yourPost")}
+        onClose={() => setOptionsPost(null)}
+        options={[
+          {
+            label: t("post.deletePost"),
+            icon: "delete-outline",
+            destructive: true,
+            onPress: () => confirmDelete(optionsPost),
+          },
+        ]}
+      />
+    </View>
   );
 }
 
-const styles = StyleSheet.create({
+const useStyles = makeStyles((COLORS) => ({
   container: {
     flex: 1,
-    backgroundColor: "#121212",
+    backgroundColor: COLORS.background,
+  },
+  pressed: {
+    opacity: 0.7,
   },
   header: {
-    backgroundColor: "#121212",
-    borderBottomColor: "#333333",
-    paddingVertical: 8,
+    flexDirection: "row",
+    alignItems: "center",
     paddingHorizontal: 16,
-    justifyContent: "center",
-    alignItems: "center",
+    paddingTop: 12,
+    paddingBottom: 12,
   },
-  headerTitle: {
-    color: "#FFFFFF",
-    fontSize: 20,
-    fontWeight: "bold",
-    fontFamily: "Helvetica Neue",
-  },
-  content: {
+  headerText: {
     flex: 1,
-    backgroundColor: "#121212",
   },
-  postContainer: {
-    marginBottom: 40, // Large gap between posts
+  title: {
+    color: COLORS.text,
+    fontSize: 28,
+    fontWeight: "800",
+    letterSpacing: 0.2,
   },
-  postHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingVertical: 6,
-    paddingHorizontal: 8,
-  },
-  userImage: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-  },
-  userName: {
-    color: "#FFFFFF",
+  subtitle: {
+    color: COLORS.textSecondary,
     fontSize: 13,
-    fontWeight: "500",
-    marginLeft: 8,
-    fontFamily: "Helvetica Neue",
+    marginTop: 2,
   },
-  imageContainer: {
-    position: "relative",
-  },
-  postImage: {
-    width: "100%",
-    height: undefined,
-    aspectRatio: 1080 / 1350, // 4:5 aspect ratio (1080x1350)
-  },
-  caption: {
-    color: "#FFFFFF",
-    fontSize: 12,
-    fontWeight: "400",
-    fontFamily: "Helvetica Neue",
-    maxWidth: "80%",
-    marginTop: 8,
-    marginHorizontal: 8,
-  },
-  captionUser: {
-    fontWeight: "600",
-    fontFamily: "Helvetica Neue",
-  },
-  footer: {
-    flexDirection: "column",
-    alignItems: "flex-start",
-    paddingVertical: 6,
-    paddingHorizontal: 8,
-  },
-  likeContainer: {
+  createButton: {
     flexDirection: "row",
     alignItems: "center",
+    gap: 4,
+    borderRadius: 20,
+    paddingVertical: 8,
+    paddingLeft: 10,
+    paddingRight: 14,
   },
-  likeButton: {
-    paddingRight: 10,
+  createText: {
+    color: COLORS.onImage,
+    fontSize: 14,
+    fontWeight: "700",
   },
-  likeCount: {
-    color: "#B0B0B0",
-    fontSize: 11,
-    fontWeight: "500",
-    fontFamily: "Helvetica Neue",
+  list: {
+    paddingTop: 4,
+    paddingBottom: 24,
   },
-  postDate: {
-    color: "#B0B0B0",
-    fontSize: 11,
-    fontWeight: "400",
-    fontFamily: "Helvetica Neue",
-    marginTop: 4,
+  separator: {
+    height: 14,
   },
-  loadingText: {
-    color: "#FFFFFF",
-    fontSize: 16,
+  emptyContainer: {
+    flexGrow: 1,
+  },
+  centered: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 32,
+  },
+  emptyIcon: {
+    width: 76,
+    height: 76,
+    borderRadius: 38,
+    backgroundColor: COLORS.accentSoft,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  emptyTitle: {
+    color: COLORS.text,
+    fontSize: 20,
+    fontWeight: "700",
+    marginTop: 16,
+  },
+  message: {
+    color: COLORS.textSecondary,
+    fontSize: 14,
     textAlign: "center",
-    marginTop: 20,
+    lineHeight: 20,
+    marginTop: 8,
   },
-  noPostsText: {
-    color: "#FFFFFF",
-    fontSize: 16,
-    textAlign: "center",
-    marginTop: 20,
+  retryButton: {
+    marginTop: 16,
+    backgroundColor: COLORS.surface,
+    borderRadius: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 20,
   },
-});
+  retryText: {
+    color: COLORS.text,
+    fontSize: 14,
+    fontWeight: "600",
+  },
+}));

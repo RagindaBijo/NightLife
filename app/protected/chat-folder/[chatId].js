@@ -3,6 +3,8 @@ import { Image } from 'expo-image';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useEffect, useRef } from 'react';
 import { KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { useI18n } from '../../../lib/i18n';
+import { makeStyles, useTheme } from '../../../lib/theme-context';
 
 // Mock data for the conversation (in a real app, fetch from API)
 const mockUsers = {
@@ -70,6 +72,9 @@ const mockMessages = {
 };
 
 export default function ChatDetail() {
+  const { colors: COLORS } = useTheme();
+  const { t } = useI18n();
+  const styles = useStyles();
   const { chatId } = useLocalSearchParams();
   const router = useRouter();
   const user = mockUsers[chatId] || { userName: 'Unknown', userImage: 'https://picsum.photos/50/50?random=0' };
@@ -87,7 +92,7 @@ export default function ChatDetail() {
     <View style={styles.container}>
       <View style={styles.customHeader}>
         <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
-          <FontAwesome name="arrow-left" size={20} color="#FFFFFF" />
+          <FontAwesome name="arrow-left" size={20} color={COLORS.text} />
         </TouchableOpacity>
         <View style={styles.headerUserInfo}>
           <Image source={{ uri: user.userImage }} style={styles.userImage} contentFit="cover" />
@@ -121,11 +126,11 @@ export default function ChatDetail() {
         <View style={styles.inputContainer}>
           <TextInput
             style={styles.textInput}
-            placeholder="Message..."
-            placeholderTextColor="#B0B0B0"
+            placeholder={t('chat.messagePlaceholder')}
+            placeholderTextColor={COLORS.textSecondary}
           />
           <TouchableOpacity style={styles.sendButton}>
-            <FontAwesome name="paper-plane" size={20} color="#007AFF" />
+            <FontAwesome name="paper-plane" size={20} color={COLORS.accentStrong} />
           </TouchableOpacity>
         </View>
       </KeyboardAvoidingView>
@@ -133,19 +138,19 @@ export default function ChatDetail() {
   );
 }
 
-const styles = StyleSheet.create({
+const useStyles = makeStyles((COLORS) => ({
   container: {
     flex: 1,
-    backgroundColor: '#121212',
+    backgroundColor: COLORS.background,
   },
   customHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     paddingVertical: 12,
     paddingHorizontal: 12,
-    backgroundColor: '#121212',
+    backgroundColor: COLORS.background,
     borderBottomWidth: 1,
-    borderBottomColor: '#2A2A2A',
+    borderBottomColor: COLORS.surfacePressed,
   },
   backButton: {
     paddingRight: 12,
@@ -160,7 +165,7 @@ const styles = StyleSheet.create({
     borderRadius: 16,
   },
   userName: {
-    color: '#FFFFFF',
+    color: COLORS.text,
     fontSize: 14,
     fontWeight: '600',
     fontFamily: 'Helvetica Neue',
@@ -178,20 +183,20 @@ const styles = StyleSheet.create({
   },
   selfMessage: {
     alignSelf: 'flex-end',
-    backgroundColor: '#007AFF',
+    backgroundColor: COLORS.accentStrong,
   },
   otherMessage: {
     alignSelf: 'flex-start',
-    backgroundColor: '#2A2A2A',
+    backgroundColor: COLORS.surfacePressed,
   },
   messageText: {
-    color: '#FFFFFF',
+    color: COLORS.text,
     fontSize: 13,
     fontWeight: '400',
     fontFamily: 'Helvetica Neue',
   },
   messageTimestamp: {
-    color: '#B0B0B0',
+    color: COLORS.textSecondary,
     fontSize: 10,
     fontWeight: '400',
     fontFamily: 'Helvetica Neue',
@@ -203,14 +208,14 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     paddingVertical: 5,
     paddingHorizontal: 10,
-    backgroundColor: '#1A1A1A',
+    backgroundColor: COLORS.backgroundElevated,
     borderTopWidth: 1,
-    borderTopColor: '#2A2A2A',
+    borderTopColor: COLORS.surfacePressed,
   },
   textInput: {
     flex: 1,
-    backgroundColor: '#2A2A2A',
-    color: '#FFFFFF',
+    backgroundColor: COLORS.surfacePressed,
+    color: COLORS.text,
     fontSize: 13,
     fontWeight: '400',
     fontFamily: 'Helvetica Neue',
@@ -222,4 +227,4 @@ const styles = StyleSheet.create({
   sendButton: {
     padding: 8,
   },
-});
+}));

@@ -1,10 +1,13 @@
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Picker } from '@react-native-picker/picker';
+import { File } from 'expo-file-system';
 import { Image } from 'expo-image';
 import * as ImagePicker from 'expo-image-picker';
 import { useLocalSearchParams, useNavigation, useRouter } from 'expo-router';
 import { useEffect, useLayoutEffect, useState } from 'react';
 import { Alert, Keyboard, Modal, StyleSheet, Text, TextInput, TouchableOpacity, TouchableWithoutFeedback, View } from 'react-native';
+import { API_URL, api, getSession } from '../../../lib/api';
+import { translate, useI18n } from '../../../lib/i18n';
+import { makeStyles, useTheme } from '../../../lib/theme-context';
 
 const days = Array.from({ length: 31 }, (_, i) => (i + 1).toString().padStart(2, '0'));
 const months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
@@ -38,6 +41,10 @@ function formatEventDate(day, month) {
 }
 
 export default function CreateEvent() {
+  const { colors: COLORS } = useTheme();
+  const { t } = useI18n();
+  const monthLabel = (month) => t('months.long')[months.indexOf(month)] ?? month;
+  const styles = useStyles();
   const navigation = useNavigation();
   const router = useRouter();
   const { eventId } = useLocalSearchParams();
@@ -59,58 +66,45 @@ export default function CreateEvent() {
 
   useLayoutEffect(() => {
     navigation.setOptions({
-      title: isEditing ? 'Edit Event' : 'Create Event',
+      title: isEditing ? t('createEvent.editTitle') : t('createEvent.createTitle'),
       headerLeft: () => (
         <TouchableOpacity onPress={() => router.back()}>
-          <Text style={styles.headerButtonText}>Cancel</Text>
+          <Text style={styles.headerButtonText}>{t('common.cancel')}</Text>
         </TouchableOpacity>
       ),
       headerRight: () => (
         <TouchableOpacity onPress={handleSave}>
-          <Text style={styles.headerButtonText}>{isEditing ? 'Update' : 'Create'}</Text>
+          <Text style={styles.headerButtonText}>{isEditing ? t('createEvent.update') : t('createEvent.create')}</Text>
         </TouchableOpacity>
       ),
     });
-  }, [navigation, form, isEditing]);
+  }, [navigation, form, isEditing, styles, t]);
 
   useEffect(() => {
     const fetchEvent = async () => {
       if (!eventId) return;
       try {
-        const token = await AsyncStorage.getItem('token');
-        if (!token) {
-          Alert.alert('Error', 'No token found. Please log in again.');
-          return;
-        }
-
-        const apiUrl = 'https://night-life-api.elevator-rand.workers.dev';
-        const response = await fetch(`${apiUrl}/api/events/${eventId}`, {
-          method: 'GET',
-          headers: {
-            'Authorization': `Bearer ${token}`,
-            'Content-Type': 'application/json',
-          },
+        const data = await api(`/api/events/${eventId}`);
+        const { selectedDay, selectedMonth, eventHour, eventPeriod } = parseEventDateTime(data.time || '');
+        setForm({
+          title: data.title || '',
+          about: data.about || '',
+          selectedDay,
+          selectedMonth,
+          eventHour,
+          eventPeriod,
+          photo_uri: data.photo_id || null,
+          photo_id: data.photo_id ? data.photo_id.replace(`${API_URL}/images/`, '') : null,
         });
-
-        if (response.ok) {
-          const data = await response.json();
-          const { selectedDay, selectedMonth, eventHour, eventPeriod } = parseEventDateTime(data.time || '');
-          setForm({
-            title: data.title || '',
-            about: data.about || '',
-            selectedDay,
-            selectedMonth,
-            eventHour,
-            eventPeriod,
-            photo_uri: data.photo_id || null,
-            photo_id: data.photo_id ? data.photo_id.replace(`${apiUrl}/images/`, '') : null,
-          });
-        } else {
-          Alert.alert('Error', 'Failed to fetch event data.');
-        }
       } catch (error) {
-        console.error('Fetch event error:', error);
-        Alert.alert('Error', 'Failed to fetch event due to a network or server issue.');
+        console.error('Fetch event error:', error.message);
+        // translate(), not t: re-running this effect on a language switch would reset the form
+        Alert.alert(
+          translate('common.error'),
+          error.status === 0
+            ? translate('createEvent.fetchNetworkError')
+            : translate('createEvent.fetchError')
+        );
       }
     };
 
@@ -136,89 +130,61 @@ export default function CreateEvent() {
   const uploadImage = async () => {
     if (!form.photo_uri || form.photo_id) return form.photo_id;
     try {
-      const token = await AsyncStorage.getItem('token');
-      if (!token) {
-        throw new Error('No token found');
-      }
-      const apiUrl = 'https://night-life-api.elevator-rand.workers.dev';
       const formData = new FormData();
-      const uriParts = form.photo_uri.split('.');
-      const extension = uriParts[uriParts.length - 1];
-      formData.append('file', {
-        uri: form.photo_uri,
-        name: `event-image.${extension}`,
-        type: `image/${extension === 'jpg' || extension === 'jpeg' ? 'jpeg' : 'png'}`,
-      });
-      const response = await fetch(`${apiUrl}/api/upload-image?type=event${isEditing ? `&eventId=${eventId}` : ''}`, {
+      formData.append('file', new File(form.photo_uri));
+      const { key } = await api(`/api/upload-image?type=event${isEditing ? `&eventId=${eventId}` : ''}`, {
         method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-        },
         body: formData,
       });
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error || 'Failed to upload image');
-      }
-      const { key } = await response.json();
       return key;
     } catch (error) {
-      console.error('Image upload error:', error);
+      console.error('Image upload error:', error.message);
       throw error;
     }
   };
 
   const handleSave = async () => {
     if (!form.title || !form.about || !form.selectedDay || !form.selectedMonth || !form.photo_uri) {
-      Alert.alert('Error', 'Please fill in title, about, select a valid date, and upload an image.');
+      Alert.alert(t('common.error'), t('createEvent.missingFields'));
       return;
     }
 
     setLoading(true);
     try {
-      const token = await AsyncStorage.getItem('token');
-      const userId = await AsyncStorage.getItem('userId');
-      if (!token || !userId) {
-        Alert.alert('Error', 'No token or user ID found. Please log in again.');
+      const session = await getSession();
+      if (!session) {
+        Alert.alert(t('common.error'), t('api.loginAgain'));
         setLoading(false);
         return;
       }
 
-      const apiUrl = 'https://night-life-api.elevator-rand.workers.dev';
       const formattedDate = formatEventDate(form.selectedDay, form.selectedMonth);
       const time = `${formattedDate}: ${form.eventHour}${form.eventPeriod}`;
       const photo_id = await uploadImage();
 
       const requestBody = {
-        venue_id: userId,
+        venue_id: session.userId,
         title: form.title,
         time,
         about: form.about,
         photo_id,
       };
 
-      const response = await fetch(
-        isEditing ? `${apiUrl}/api/events/${eventId}` : `${apiUrl}/api/events`,
-        {
-          method: isEditing ? 'PUT' : 'POST',
-          headers: {
-            Authorization: `Bearer ${token}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(requestBody),
-        }
-      );
+      await api(isEditing ? `/api/events/${eventId}` : '/api/events', {
+        method: isEditing ? 'PUT' : 'POST',
+        body: requestBody,
+      });
 
-      if (response.ok) {
-        Alert.alert('Success', isEditing ? 'Event updated successfully!' : 'Event created successfully!');
-        router.back();
-      } else {
-        const errorData = await response.json();
-        Alert.alert('Error', errorData.error || `Failed to ${isEditing ? 'update' : 'create'} event.`);
-      }
+      Alert.alert(t('createEvent.success'), isEditing ? t('createEvent.updated') : t('createEvent.created'));
+      router.back();
     } catch (error) {
-      console.error(`${isEditing ? 'Update' : 'Create'} event failed:`, error);
-      Alert.alert('Error', `Failed to ${isEditing ? 'update' : 'create'} event due to a network or server issue.`);
+      console.error(`${isEditing ? 'Update' : 'Create'} event failed:`, error.message);
+      Alert.alert(
+        t('common.error'),
+        error.status === 0
+          ? (isEditing ? t('createEvent.updateNetworkError') : t('createEvent.createNetworkError'))
+          : error.message || (isEditing ? t('createEvent.updateFailed') : t('createEvent.createFailed'))
+      );
     }
     setLoading(false);
   };
@@ -234,36 +200,38 @@ export default function CreateEvent() {
   return (
     <TouchableWithoutFeedback onPress={handleOutsidePress}>
       <View style={styles.container}>
-        <Text style={styles.header}>Event Title</Text>
+        <Text style={styles.header}>{t('createEvent.eventTitle')}</Text>
         <TextInput
           style={styles.input}
           value={form.title}
           onChangeText={(text) => setForm({ ...form, title: text })}
-          placeholder="Enter event title"
-          placeholderTextColor="#888888"
+          placeholder={t('createEvent.titlePlaceholder')}
+          placeholderTextColor={COLORS.placeholder}
         />
-        <Text style={styles.header}>About</Text>
+        <Text style={styles.header}>{t('createEvent.about')}</Text>
         <TextInput
           style={[styles.input, styles.aboutInput]}
           value={form.about}
           onChangeText={(text) => setForm({ ...form, about: text })}
-          placeholder="Enter event description"
-          placeholderTextColor="#888888"
+          placeholder={t('createEvent.aboutPlaceholder')}
+          placeholderTextColor={COLORS.placeholder}
           multiline
         />
-        <Text style={styles.header}>Event Date and Time</Text>
+        <Text style={styles.header}>{t('createEvent.dateAndTime')}</Text>
         <View style={styles.timeContainer}>
           <TouchableOpacity onPress={() => setShowDateModal(true)}>
-            <Text style={styles.pressableText}>{formattedDate || 'Select Date'}</Text>
+            <Text style={styles.pressableText}>
+              {formattedDate ? `${form.selectedDay}-${monthLabel(form.selectedMonth)}` : t('createEvent.selectDate')}
+            </Text>
           </TouchableOpacity>
           <Text style={styles.separatorText}>: </Text>
           <TouchableOpacity onPress={() => setShowTimeModal(true)}>
             <Text style={styles.pressableText}>{form.eventHour}{form.eventPeriod}</Text>
           </TouchableOpacity>
         </View>
-        <Text style={styles.header}>Image {form.photo_uri ? '(1 selected)' : ''}</Text>
+        <Text style={styles.header}>{form.photo_uri ? t('createEvent.imageSelected') : t('createEvent.image')}</Text>
         <TouchableOpacity style={styles.uploadButton} onPress={pickImage}>
-          <Text style={styles.uploadButtonText}>Upload Image</Text>
+          <Text style={styles.uploadButtonText}>{t('createEvent.uploadImage')}</Text>
         </TouchableOpacity>
         {form.photo_uri && (
           <View style={styles.imageContainer}>
@@ -280,14 +248,14 @@ export default function CreateEvent() {
             </TouchableOpacity>
           </View>
         )}
-        {loading && <Text style={styles.header}>{isEditing ? 'Updating event...' : 'Creating event...'}</Text>}
+        {loading && <Text style={styles.header}>{isEditing ? t('createEvent.updating') : t('createEvent.creating')}</Text>}
 
         <Modal visible={showDateModal} transparent animationType="fade">
           <TouchableWithoutFeedback onPress={() => setShowDateModal(false)}>
             <View style={styles.modalContainer}>
               <TouchableWithoutFeedback>
                 <View style={styles.modalContent}>
-                  <Text style={styles.modalTitle}>Select Event Date</Text>
+                  <Text style={styles.modalTitle}>{t('createEvent.selectDateTitle')}</Text>
                   <View style={styles.pickerContainer}>
                     <Picker
                       selectedValue={form.selectedDay}
@@ -304,7 +272,7 @@ export default function CreateEvent() {
                       style={styles.picker}
                     >
                       {months.map((m) => (
-                        <Picker.Item key={m} label={m} value={m} />
+                        <Picker.Item key={m} label={monthLabel(m)} value={m} />
                       ))}
                     </Picker>
                   </View>
@@ -312,7 +280,7 @@ export default function CreateEvent() {
                     style={styles.confirmButton}
                     onPress={() => setShowDateModal(false)}
                   >
-                    <Text style={styles.confirmButtonText}>Confirm</Text>
+                    <Text style={styles.confirmButtonText}>{t('common.confirm')}</Text>
                   </TouchableOpacity>
                 </View>
               </TouchableWithoutFeedback>
@@ -325,7 +293,7 @@ export default function CreateEvent() {
             <View style={styles.modalContainer}>
               <TouchableWithoutFeedback>
                 <View style={styles.modalContent}>
-                  <Text style={styles.modalTitle}>Select Event Time</Text>
+                  <Text style={styles.modalTitle}>{t('createEvent.selectTimeTitle')}</Text>
                   <View style={styles.pickerContainer}>
                     <Picker
                       selectedValue={form.eventHour}
@@ -349,7 +317,7 @@ export default function CreateEvent() {
                     style={styles.confirmButton}
                     onPress={() => setShowTimeModal(false)}
                   >
-                    <Text style={styles.confirmButtonText}>Confirm</Text>
+                    <Text style={styles.confirmButtonText}>{t('common.confirm')}</Text>
                   </TouchableOpacity>
                 </View>
               </TouchableWithoutFeedback>
@@ -361,25 +329,25 @@ export default function CreateEvent() {
   );
 }
 
-const styles = StyleSheet.create({
+const useStyles = makeStyles((COLORS) => ({
   container: {
     flex: 1,
-    backgroundColor: '#121212',
+    backgroundColor: COLORS.background,
     padding: 20,
   },
   header: {
     fontSize: 20,
     fontWeight: 'bold',
-    color: '#FFFFFF',
+    color: COLORS.text,
     alignSelf: 'flex-start',
     marginBottom: 10,
     marginTop: 20,
   },
   input: {
-    backgroundColor: '#1E1E1E',
+    backgroundColor: COLORS.surface,
     borderRadius: 8,
     padding: 10,
-    color: '#FFFFFF',
+    color: COLORS.text,
     width: '100%',
     marginBottom: 15,
     fontSize: 16,
@@ -395,16 +363,16 @@ const styles = StyleSheet.create({
   },
   pressableText: {
     fontSize: 16,
-    color: '#3897f0',
+    color: COLORS.accent,
     fontWeight: 'bold',
   },
   separatorText: {
     fontSize: 16,
-    color: '#E0E0E0',
+    color: COLORS.textSecondary,
     marginHorizontal: 5,
   },
   uploadButton: {
-    backgroundColor: '#1C2526',
+    backgroundColor: COLORS.surface,
     borderRadius: 8,
     paddingVertical: 10,
     paddingHorizontal: 20,
@@ -412,7 +380,7 @@ const styles = StyleSheet.create({
     marginBottom: 15,
   },
   uploadButtonText: {
-    color: '#FFFFFF',
+    color: COLORS.text,
     fontSize: 16,
     fontWeight: 'bold',
   },
@@ -437,7 +405,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   removeButtonText: {
-    color: '#FFFFFF',
+    color: COLORS.text,
     fontSize: 16,
     fontWeight: 'bold',
   },
@@ -448,7 +416,7 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0, 0, 0, 0.5)',
   },
   modalContent: {
-    backgroundColor: '#1E1E1E',
+    backgroundColor: COLORS.surface,
     padding: 20,
     borderRadius: 10,
     width: '80%',
@@ -457,7 +425,7 @@ const styles = StyleSheet.create({
   modalTitle: {
     fontSize: 18,
     fontWeight: 'bold',
-    color: '#FFFFFF',
+    color: COLORS.text,
     marginBottom: 10,
   },
   pickerContainer: {
@@ -466,15 +434,15 @@ const styles = StyleSheet.create({
     width: '100%',
   },
   picker: {
-    color: '#FFFFFF',
-    backgroundColor: '#333333',
+    color: COLORS.text,
+    backgroundColor: COLORS.border,
     width: '45%',
     borderWidth: 1,
-    borderColor: '#3897f0',
+    borderColor: COLORS.accent,
     borderRadius: 8,
   },
   confirmButton: {
-    backgroundColor: '#1C2526',
+    backgroundColor: COLORS.surface,
     borderRadius: 8,
     paddingVertical: 8,
     paddingHorizontal: 16,
@@ -484,11 +452,11 @@ const styles = StyleSheet.create({
   confirmButtonText: {
     fontSize: 16,
     fontWeight: 'bold',
-    color: '#FFFFFF',
+    color: COLORS.text,
   },
   headerButtonText: {
-    color: '#FFFFFF',
+    color: COLORS.text,
     fontSize: 16,
     paddingHorizontal: 10,
   },
-});
+}));

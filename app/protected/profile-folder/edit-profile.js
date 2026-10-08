@@ -1,22 +1,74 @@
 import { MaterialIcons } from "@expo/vector-icons";
-import AsyncStorage from "@react-native-async-storage/async-storage";
+import { File } from "expo-file-system";
 import { Image } from "expo-image";
 import * as ImagePicker from "expo-image-picker";
+import { LinearGradient } from "expo-linear-gradient";
 import { useNavigation, useRouter } from "expo-router";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useState } from "react";
 import {
+  ActivityIndicator,
   Alert,
   Animated,
+  KeyboardAvoidingView,
   Modal,
+  Platform,
+  Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
-  TouchableOpacity,
-  TouchableWithoutFeedback,
   View,
 } from "react-native";
+import { API_URL, api, getSession } from "../../../lib/api";
+import { translate, useI18n } from "../../../lib/i18n";
+import { makeStyles, useTheme } from "../../../lib/theme-context";
+
+function Field({ label, prefix, multiline, ...inputProps }) {
+  const { colors: COLORS } = useTheme();
+  const styles = useStyles();
+  const [focused, setFocused] = useState(false);
+
+  return (
+    <View style={[styles.field, focused && styles.fieldFocused]}>
+      <Text style={[styles.fieldLabel, focused && styles.fieldLabelFocused]}>
+        {label}
+      </Text>
+      <View style={styles.fieldRow}>
+        {prefix && <Text style={styles.fieldPrefix}>{prefix}</Text>}
+        <TextInput
+          style={[styles.fieldInput, multiline && styles.fieldInputMultiline]}
+          placeholderTextColor={COLORS.placeholder}
+          selectionColor={COLORS.accent}
+          multiline={multiline}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
+          {...inputProps}
+        />
+      </View>
+    </View>
+  );
+}
+
+function SheetOption({ icon, label, color, onPress }) {
+  const { colors: COLORS } = useTheme();
+  const styles = useStyles();
+  const tint = color ?? COLORS.text;
+  return (
+    <Pressable
+      onPress={onPress}
+      style={({ pressed }) => [styles.sheetOption, pressed && styles.sheetOptionPressed]}
+      accessibilityRole="button"
+    >
+      <MaterialIcons name={icon} size={24} color={tint} />
+      <Text style={[styles.sheetOptionText, { color: tint }]}>{label}</Text>
+    </Pressable>
+  );
+}
 
 export default function EditProfile() {
+  const { colors: COLORS } = useTheme();
+  const { t } = useI18n();
+  const styles = useStyles();
   const navigation = useNavigation();
   const router = useRouter();
   const [form, setForm] = useState({
@@ -24,100 +76,114 @@ export default function EditProfile() {
     last_name: "",
     username: "",
     bio_text: "",
-    profile_photo: "",
+    profile_photo: "", // full URL, or "" when there is no photo
   });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [uploading, setUploading] = useState(false);
   const [showPhotoModal, setShowPhotoModal] = useState(false);
-  const apiUrl = "https://night-life-api.elevator-rand.workers.dev";
-  const imageDomain = `${apiUrl}/images`;
+  const [sheetY] = useState(() => new Animated.Value(300));
+  const imageDomain = `${API_URL}/images`;
 
-  // Animation setup for bottom sheet slide-up
-  const photoSlideAnim = useRef(new Animated.Value(300)).current;
+  const setField = (key) => (text) => setForm((prev) => ({ ...prev, [key]: text }));
 
+  // Bottom sheet slide-up
   useEffect(() => {
     if (showPhotoModal) {
-      Animated.timing(photoSlideAnim, {
+      Animated.spring(sheetY, {
         toValue: 0,
-        duration: 150,
         useNativeDriver: true,
+        speed: 20,
+        bounciness: 4,
       }).start();
     } else {
-      photoSlideAnim.setValue(300);
+      sheetY.setValue(300);
     }
-  }, [showPhotoModal]);
+  }, [showPhotoModal, sheetY]);
 
-  useLayoutEffect(() => {
-    navigation.setOptions({
-      headerLeft: () => (
-        <TouchableOpacity onPress={() => router.back()}>
-          <Text style={styles.headerButtonText}>Cancel</Text>
-        </TouchableOpacity>
-      ),
-      headerRight: () => (
-        <TouchableOpacity onPress={handleSave}>
-          <Text style={styles.headerButtonText}>Done</Text>
-        </TouchableOpacity>
-      ),
-    });
-  }, [navigation, form]);
-
-  useEffect(() => {
-    const fetchUser = async () => {
-      try {
-        const token = await AsyncStorage.getItem("token");
-        const userId = await AsyncStorage.getItem("userId");
-        if (!token || !userId) {
-          setError("No token or user ID found. Please log in again.");
-          setLoading(false);
-          return;
-        }
-
-        const response = await fetch(`${apiUrl}/api/user/${userId}`, {
-          method: "GET",
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
-          },
-        });
-
-        if (response.ok) {
-          const data = await response.json();
-          if (data.error) {
-            setError("User profile not found in database.");
-            setLoading(false);
-            return;
-          }
+  const fetchUser = useCallback(
+    () =>
+      getSession()
+        .then((session) => {
+          if (!session) throw new Error(translate("api.loginAgain"));
+          return api(`/api/user/${session.userId}`);
+        })
+        .then((data) => {
           setForm({
             first_name: data.first_name || "",
             last_name: data.last_name || "",
             username: data.username || "",
             bio_text: data.bio_text || "",
-            profile_photo: data.profile_photo
-              ? `${imageDomain}/${data.profile_photo}`
-              : "https://picsum.photos/800/600?random=11",
+            // profile_photo is a full URL from the API
+            profile_photo: data.profile_photo || "",
           });
-        } else {
-          setError(`Failed to fetch user profile: HTTP ${response.status}`);
-        }
-        setLoading(false);
-      } catch (error) {
-        console.error("Error fetching user profile:", error);
-        setError("Error fetching user profile: Network or server issue.");
-        setLoading(false);
-      }
-    };
+          setError(null);
+        })
+        .catch((err) => {
+          console.error("Error fetching user profile:", err.message);
+          setError(
+            err.status === 0
+              ? translate("common.cantConnect")
+              : translate("profile.loadError"),
+          );
+        })
+        .finally(() => setLoading(false)),
+    [],
+  );
 
+  useEffect(() => {
     fetchUser();
-  }, []);
+  }, [fetchUser]);
+
+  const retryFetch = () => {
+    setLoading(true);
+    setError(null);
+    fetchUser();
+  };
+
+  const uploadImage = async (asset) => {
+    setUploading(true);
+    try {
+      const formData = new FormData();
+      formData.append("file", new File(asset.uri));
+
+      const { url } = await api("/api/upload-image", {
+        method: "POST",
+        body: formData,
+      });
+
+      // Delete old profile photo if exists (a failed delete doesn't block the upload)
+      const oldKey = form.profile_photo.replace(`${imageDomain}/`, "");
+      if (oldKey) {
+        try {
+          await api(`/api/delete-image/${oldKey}`, { method: "DELETE" });
+        } catch (err) {
+          console.warn("Delete old photo failed:", err.message);
+        }
+      }
+      setForm((prev) => ({ ...prev, profile_photo: url }));
+    } catch (err) {
+      console.error("Upload error:", err.message);
+      Alert.alert(
+        t("common.uploadFailed"),
+        err.status === 0
+          ? t("common.uploadNetworkError")
+          : err.message || t("common.uploadFailedMessage"),
+      );
+    } finally {
+      setUploading(false);
+    }
+  };
 
   const pickImage = async () => {
+    setShowPhotoModal(false);
     const permissionResult =
       await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (!permissionResult.granted) {
       Alert.alert(
-        "Permission Denied",
-        "Please allow access to your photos to upload an image.",
+        t("common.permissionDenied"),
+        t("common.photosPermission"),
       );
       return;
     }
@@ -132,15 +198,15 @@ export default function EditProfile() {
     if (!result.canceled && result.assets && result.assets.length > 0) {
       await uploadImage(result.assets[0]);
     }
-    setShowPhotoModal(false);
   };
 
   const takePhoto = async () => {
+    setShowPhotoModal(false);
     const permissionResult = await ImagePicker.requestCameraPermissionsAsync();
     if (!permissionResult.granted) {
       Alert.alert(
-        "Permission Denied",
-        "Please allow access to your camera to take a photo.",
+        t("common.permissionDenied"),
+        t("common.cameraPermission"),
       );
       return;
     }
@@ -155,313 +221,446 @@ export default function EditProfile() {
     if (!result.canceled && result.assets && result.assets.length > 0) {
       await uploadImage(result.assets[0]);
     }
-    setShowPhotoModal(false);
-  };
-
-  const uploadImage = async (asset) => {
-    try {
-      const token = await AsyncStorage.getItem("token");
-      const userId = await AsyncStorage.getItem("userId");
-      if (!token || !userId) {
-        Alert.alert("Error", "Authentication required. Please log in again.");
-        return;
-      }
-
-      const formData = new FormData();
-      formData.append("file", {
-        uri: asset.uri,
-        type: asset.mimeType || "image/jpeg",
-        name: `image.${asset.uri.split(".").pop()?.toLowerCase() || "jpg"}`,
-      });
-
-      const response = await fetch(`${apiUrl}/api/upload-image`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "multipart/form-data",
-        },
-        body: formData,
-      });
-
-      if (response.ok) {
-        const { url, key } = await response.json();
-        // Delete old profile photo if exists
-        const oldKey = form.profile_photo.replace(`${imageDomain}/`, "");
-        if (oldKey) {
-          await fetch(`${apiUrl}/api/delete-image/${oldKey}`, {
-            method: "DELETE",
-            headers: {
-              Authorization: `Bearer ${token}`,
-            },
-          });
-        }
-        setForm({ ...form, profile_photo: url });
-      } else {
-        const errorData = await response.json();
-        Alert.alert("Error", errorData.error || "Failed to upload image.");
-      }
-    } catch (error) {
-      console.error("Upload error:", error);
-      Alert.alert(
-        "Error",
-        "Failed to upload image due to a network or server issue.",
-      );
-    }
   };
 
   const handleRemovePhoto = () => {
     // Delete old profile photo if exists
     const oldKey = form.profile_photo.replace(`${imageDomain}/`, "");
     if (oldKey) {
-      const token = AsyncStorage.getItem("token");
-      fetch(`${apiUrl}/api/delete-image/${oldKey}`, {
-        method: "DELETE",
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      });
+      api(`/api/delete-image/${oldKey}`, { method: "DELETE" }).catch((err) =>
+        console.warn("Delete photo failed:", err.message),
+      );
     }
-    setForm({ ...form, profile_photo: "" });
+    setForm((prev) => ({ ...prev, profile_photo: "" }));
     setShowPhotoModal(false);
   };
 
-  const handleSave = async () => {
+  const handleSave = useCallback(async () => {
+    if (saving || uploading) return;
+    setSaving(true);
     try {
-      const token = await AsyncStorage.getItem("token");
-      const userId = await AsyncStorage.getItem("userId");
-      if (!token || !userId) {
-        Alert.alert("Error", "No token or user ID found. Please log in again.");
+      const session = await getSession();
+      if (!session) {
+        Alert.alert(t("common.error"), t("api.loginAgain"));
         return;
       }
 
-      const response = await fetch(`${apiUrl}/api/user/${userId}`, {
+      await api(`/api/user/${session.userId}`, {
         method: "PUT",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
+        body: {
+          first_name: form.first_name.trim(),
+          last_name: form.last_name.trim(),
+          username: form.username.trim(),
+          bio_text: form.bio_text.trim(),
+          profile_photo: form.profile_photo.replace(`${imageDomain}/`, ""),
         },
-        body: JSON.stringify({
-          first_name: form.first_name,
-          last_name: form.last_name,
-          username: form.username,
-          bio_text: form.bio_text,
-          profile_photo:
-            form.profile_photo.replace(`${imageDomain}/`, "") || "",
-        }),
       });
 
-      if (response.ok) {
-        Alert.alert("Success", "Profile updated successfully!");
-        router.back();
-      } else {
-        const errorData = await response.json();
-        Alert.alert("Error", errorData.error || "Failed to update profile.");
-      }
-    } catch (error) {
-      console.error("Update profile failed:", error);
+      // The profile screen refreshes itself when it comes back into view
+      router.back();
+    } catch (err) {
+      console.error("Update profile failed:", err.message);
       Alert.alert(
-        "Error",
-        "Failed to update profile due to a network or server issue.",
+        t("common.saveError"),
+        err.status === 0
+          ? t("editProfile.saveNetworkError")
+          : err.message || t("editProfile.saveFailed"),
       );
+    } finally {
+      setSaving(false);
     }
-  };
+  }, [form, saving, uploading, imageDomain, router, t]);
+
+  useLayoutEffect(() => {
+    navigation.setOptions({
+      headerStyle: { backgroundColor: COLORS.background },
+      headerShadowVisible: false,
+      headerTitleStyle: { fontWeight: "700" },
+      headerLeft: () => (
+        <Pressable onPress={() => router.back()} hitSlop={10} disabled={saving}>
+          <Text style={styles.headerCancel}>{t("common.cancel")}</Text>
+        </Pressable>
+      ),
+      headerRight: () =>
+        saving ? (
+          <ActivityIndicator color={COLORS.accent} />
+        ) : (
+          <Pressable onPress={handleSave} hitSlop={10} disabled={loading || uploading}>
+            <Text
+              style={[
+                styles.headerDone,
+                (loading || uploading) && styles.headerDoneDisabled,
+              ]}
+            >
+              {t("common.done")}
+            </Text>
+          </Pressable>
+        ),
+    });
+  }, [navigation, router, handleSave, saving, loading, uploading, COLORS, styles, t]);
 
   if (loading) {
     return (
-      <View style={styles.container}>
-        <Text style={styles.label}>Loading...</Text>
+      <View style={styles.centered}>
+        <ActivityIndicator size="large" color={COLORS.accent} />
       </View>
     );
   }
 
   if (error) {
     return (
-      <View style={styles.container}>
-        <Text style={styles.label}>{error}</Text>
+      <View style={styles.centered}>
+        <MaterialIcons name="cloud-off" size={48} color={COLORS.textSecondary} />
+        <Text style={styles.errorText}>{error}</Text>
+        <Pressable
+          onPress={retryFetch}
+          style={({ pressed }) => [styles.retryButton, pressed && styles.pressed]}
+        >
+          <Text style={styles.retryButtonText}>{t("common.tryAgain")}</Text>
+        </Pressable>
       </View>
     );
   }
 
   return (
-    <View style={styles.container}>
-      <View style={styles.profileImageContainer}>
-        <TouchableOpacity onPress={() => setShowPhotoModal(true)}>
-          <Image
-            source={{
-              uri:
-                form.profile_photo || "https://picsum.photos/800/600?random=11",
-            }}
-            style={styles.profileImage}
-            contentFit="cover"
-            backgroundColor="#808080"
-          />
-        </TouchableOpacity>
-        <TouchableOpacity onPress={() => setShowPhotoModal(true)}>
-          <Text style={styles.changePhotoText}>Change Profile Photo</Text>
-        </TouchableOpacity>
-      </View>
-      <Text style={styles.label}>First Name</Text>
-      <TextInput
-        style={styles.input}
-        value={form.first_name}
-        onChangeText={(text) => setForm({ ...form, first_name: text })}
-        placeholder="Enter first name"
-        placeholderTextColor="#888888"
-      />
-      <Text style={styles.label}>Last Name</Text>
-      <TextInput
-        style={styles.input}
-        value={form.last_name}
-        onChangeText={(text) => setForm({ ...form, last_name: text })}
-        placeholder="Enter last name"
-        placeholderTextColor="#888888"
-      />
-      <Text style={styles.label}>Username</Text>
-      <TextInput
-        style={styles.input}
-        value={form.username}
-        onChangeText={(text) => setForm({ ...form, username: text })}
-        placeholder="Enter username"
-        placeholderTextColor="#888888"
-      />
-      <Text style={styles.label}>Bio</Text>
-      <TextInput
-        style={[styles.input, styles.bioInput]}
-        value={form.bio_text}
-        onChangeText={(text) => setForm({ ...form, bio_text: text })}
-        placeholder="Enter bio"
-        placeholderTextColor="#888888"
-        multiline
-      />
+    <KeyboardAvoidingView
+      style={styles.container}
+      behavior={Platform.OS === "ios" ? "padding" : undefined}
+      keyboardVerticalOffset={Platform.OS === "ios" ? 100 : 0}
+    >
+      <ScrollView
+        contentContainerStyle={styles.content}
+        keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}
+      >
+        {/* Photo */}
+        <Pressable
+          onPress={() => setShowPhotoModal(true)}
+          disabled={uploading}
+          style={styles.photoSection}
+          accessibilityRole="button"
+          accessibilityLabel={t("editProfile.changePhoto")}
+        >
+          <LinearGradient
+            colors={[COLORS.accent, COLORS.accentPink]}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
+            style={styles.avatarRing}
+          >
+            <View style={styles.avatarInner}>
+              {form.profile_photo ? (
+                <Image
+                  source={{ uri: form.profile_photo }}
+                  style={styles.avatar}
+                  contentFit="cover"
+                  transition={200}
+                />
+              ) : (
+                <MaterialIcons name="person" size={56} color={COLORS.textSecondary} />
+              )}
+              {uploading && (
+                <View style={styles.avatarOverlay}>
+                  <ActivityIndicator color={COLORS.onImage} />
+                </View>
+              )}
+            </View>
+          </LinearGradient>
+          <View style={styles.cameraBadge}>
+            <MaterialIcons name="photo-camera" size={16} color={COLORS.onAccent} />
+          </View>
+          <Text style={styles.changePhotoText}>
+            {uploading ? t("editProfile.uploading") : t("editProfile.editPicture")}
+          </Text>
+        </Pressable>
+
+        {/* Fields */}
+        <View style={styles.row}>
+          <View style={styles.rowItem}>
+            <Field
+              label={t("editProfile.firstName")}
+              value={form.first_name}
+              onChangeText={setField("first_name")}
+              placeholder={t("editProfile.firstName")}
+              autoCapitalize="words"
+              returnKeyType="next"
+            />
+          </View>
+          <View style={styles.rowItem}>
+            <Field
+              label={t("editProfile.lastName")}
+              value={form.last_name}
+              onChangeText={setField("last_name")}
+              placeholder={t("editProfile.lastName")}
+              autoCapitalize="words"
+              returnKeyType="next"
+            />
+          </View>
+        </View>
+        <Field
+          label={t("editProfile.username")}
+          prefix="@"
+          value={form.username}
+          onChangeText={setField("username")}
+          placeholder={t("editProfile.usernamePlaceholder")}
+          autoCapitalize="none"
+          autoCorrect={false}
+          returnKeyType="next"
+        />
+        <Field
+          label={t("editProfile.bio")}
+          value={form.bio_text}
+          onChangeText={setField("bio_text")}
+          placeholder={t("editProfile.bioPlaceholder")}
+          multiline
+        />
+      </ScrollView>
+
+      {/* Photo options */}
       <Modal
         visible={showPhotoModal}
         transparent
         animationType="fade"
         onRequestClose={() => setShowPhotoModal(false)}
       >
-        <TouchableWithoutFeedback onPress={() => setShowPhotoModal(false)}>
-          <View style={styles.bottomSheetContainer}>
-            <TouchableWithoutFeedback>
-              <Animated.View
-                style={[
-                  styles.bottomSheetContent,
-                  { transform: [{ translateY: photoSlideAnim }] },
-                ]}
-              >
-                <Text style={styles.modalTitle}>Change Profile Photo</Text>
-                <TouchableOpacity
-                  style={styles.optionButton}
-                  onPress={pickImage}
-                >
-                  <MaterialIcons
-                    name="photo-library"
-                    size={24}
-                    color="#FFFFFF"
-                  />
-                  <Text style={styles.optionText}>Choose from Library</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={styles.optionButton}
-                  onPress={takePhoto}
-                >
-                  <MaterialIcons name="camera" size={24} color="#FFFFFF" />
-                  <Text style={styles.optionText}>Take Photo</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={styles.optionButton}
-                  onPress={handleRemovePhoto}
-                >
-                  <MaterialIcons name="delete" size={24} color="#FF4444" />
-                  <Text style={styles.optionText}>Remove Current Picture</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[styles.optionButton, { borderTopWidth: 0 }]}
-                  onPress={() => setShowPhotoModal(false)}
-                >
-                  <Text style={[styles.optionText, { color: "#FF4444" }]}>
-                    Cancel
-                  </Text>
-                </TouchableOpacity>
-              </Animated.View>
-            </TouchableWithoutFeedback>
-          </View>
-        </TouchableWithoutFeedback>
+        <Pressable style={styles.sheetBackdrop} onPress={() => setShowPhotoModal(false)}>
+          <Animated.View
+            style={[styles.sheet, { transform: [{ translateY: sheetY }] }]}
+            onStartShouldSetResponder={() => true}
+          >
+            <View style={styles.sheetHandle} />
+            <Text style={styles.sheetTitle}>{t("editProfile.profilePhoto")}</Text>
+            <SheetOption icon="photo-library" label={t("editProfile.chooseFromLibrary")} onPress={pickImage} />
+            <SheetOption icon="photo-camera" label={t("editProfile.takePhoto")} onPress={takePhoto} />
+            {!!form.profile_photo && (
+              <SheetOption
+                icon="delete-outline"
+                label={t("editProfile.removePicture")}
+                color={COLORS.danger}
+                onPress={handleRemovePhoto}
+              />
+            )}
+            <Pressable
+              onPress={() => setShowPhotoModal(false)}
+              style={({ pressed }) => [styles.sheetCancel, pressed && styles.sheetOptionPressed]}
+            >
+              <Text style={styles.sheetCancelText}>{t("common.cancel")}</Text>
+            </Pressable>
+          </Animated.View>
+        </Pressable>
       </Modal>
-    </View>
+    </KeyboardAvoidingView>
   );
 }
 
-const styles = StyleSheet.create({
+const useStyles = makeStyles((COLORS) => ({
   container: {
     flex: 1,
-    backgroundColor: "#121212",
-    padding: 20,
-    alignItems: "center",
+    backgroundColor: COLORS.background,
   },
-  profileImageContainer: {
+  centered: {
+    flex: 1,
+    backgroundColor: COLORS.background,
     alignItems: "center",
-    marginBottom: 20,
+    justifyContent: "center",
+    padding: 24,
   },
-  profileImage: {
-    width: 100,
-    height: 100,
-    borderRadius: 50,
+  content: {
+    padding: 16,
+    paddingBottom: 40,
+  },
+  pressed: {
+    opacity: 0.6,
+  },
+
+  // Header
+  headerCancel: {
+    color: COLORS.text,
+    fontSize: 16,
+  },
+  headerDone: {
+    color: COLORS.accent,
+    fontSize: 16,
+    fontWeight: "700",
+  },
+  headerDoneDisabled: {
+    opacity: 0.4,
+  },
+
+  // Photo
+  photoSection: {
+    alignItems: "center",
+    marginTop: 8,
+    marginBottom: 28,
+  },
+  avatarRing: {
+    width: 104,
+    height: 104,
+    borderRadius: 52,
+    padding: 3,
+  },
+  avatarInner: {
+    flex: 1,
+    borderRadius: 49,
+    backgroundColor: COLORS.surface,
+    borderWidth: 3,
+    borderColor: COLORS.background,
+    alignItems: "center",
+    justifyContent: "center",
+    overflow: "hidden",
+  },
+  avatar: {
+    width: "100%",
+    height: "100%",
+  },
+  avatarOverlay: {
+    ...StyleSheet.absoluteFill,
+    backgroundColor: "rgba(0, 0, 0, 0.5)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  cameraBadge: {
+    position: "absolute",
+    top: 74,
+    marginLeft: 72,
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    backgroundColor: COLORS.accent,
+    borderWidth: 3,
+    borderColor: COLORS.background,
+    alignItems: "center",
+    justifyContent: "center",
   },
   changePhotoText: {
-    color: "#3897f0",
-    fontWeight: "bold",
-    marginTop: 10,
+    color: COLORS.accent,
+    fontSize: 15,
+    fontWeight: "600",
+    marginTop: 12,
   },
-  label: {
-    fontSize: 16,
-    color: "#FFFFFF",
-    alignSelf: "flex-start",
-    marginBottom: 5,
+
+  // Fields
+  row: {
+    flexDirection: "row",
+    gap: 10,
   },
-  input: {
-    backgroundColor: "#1E1E1E",
-    borderRadius: 8,
-    padding: 10,
-    color: "#FFFFFF",
-    width: "100%",
-    marginBottom: 15,
-  },
-  bioInput: {
-    height: 100,
-    textAlignVertical: "top",
-  },
-  headerButtonText: {
-    color: "#FFFFFF",
-    fontSize: 16,
-    paddingHorizontal: 10,
-  },
-  bottomSheetContainer: {
+  rowItem: {
     flex: 1,
-    justifyContent: "flex-end",
-    backgroundColor: "rgba(0, 0, 0, 0.5)",
   },
-  bottomSheetContent: {
-    backgroundColor: "#1E1E1E",
-    padding: 18,
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
+  field: {
+    backgroundColor: COLORS.surface,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "transparent",
+    paddingHorizontal: 14,
+    paddingTop: 10,
+    paddingBottom: 6,
+    marginBottom: 12,
   },
-  modalTitle: {
-    fontSize: 18,
-    fontWeight: "bold",
-    color: "#FFFFFF",
-    marginBottom: 20,
+  fieldFocused: {
+    borderColor: COLORS.accent,
   },
-  optionButton: {
+  fieldLabel: {
+    color: COLORS.textSecondary,
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  fieldLabelFocused: {
+    color: COLORS.accent,
+  },
+  fieldRow: {
     flexDirection: "row",
     alignItems: "center",
-    paddingVertical: 15,
-    borderTopWidth: 1,
-    borderTopColor: "#333333",
   },
-  optionText: {
+  fieldPrefix: {
+    color: COLORS.textSecondary,
     fontSize: 16,
-    color: "#FFFFFF",
-    marginLeft: 10,
+    marginRight: 2,
   },
-});
+  fieldInput: {
+    flex: 1,
+    color: COLORS.text,
+    fontSize: 16,
+    paddingVertical: 6,
+  },
+  fieldInputMultiline: {
+    minHeight: 96,
+    textAlignVertical: "top",
+  },
+
+  // Error state
+  errorText: {
+    color: COLORS.textSecondary,
+    fontSize: 15,
+    textAlign: "center",
+    marginTop: 12,
+  },
+  retryButton: {
+    marginTop: 16,
+    backgroundColor: COLORS.surface,
+    borderRadius: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 20,
+  },
+  retryButtonText: {
+    color: COLORS.text,
+    fontSize: 14,
+    fontWeight: "600",
+  },
+
+  // Bottom sheet
+  sheetBackdrop: {
+    flex: 1,
+    justifyContent: "flex-end",
+    backgroundColor: "rgba(0, 0, 0, 0.55)",
+  },
+  sheet: {
+    backgroundColor: COLORS.surface,
+    borderTopLeftRadius: 22,
+    borderTopRightRadius: 22,
+    paddingHorizontal: 8,
+    paddingBottom: 28,
+  },
+  sheetHandle: {
+    alignSelf: "center",
+    width: 40,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: COLORS.border,
+    marginTop: 10,
+    marginBottom: 12,
+  },
+  sheetTitle: {
+    color: COLORS.text,
+    fontSize: 16,
+    fontWeight: "700",
+    textAlign: "center",
+    marginBottom: 8,
+  },
+  sheetOption: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingVertical: 14,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+  },
+  sheetOptionPressed: {
+    backgroundColor: COLORS.surfacePressed,
+  },
+  sheetOptionText: {
+    fontSize: 16,
+    marginLeft: 14,
+  },
+  sheetCancel: {
+    marginTop: 8,
+    paddingVertical: 14,
+    borderRadius: 12,
+    alignItems: "center",
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: COLORS.border,
+  },
+  sheetCancelText: {
+    color: COLORS.text,
+    fontSize: 16,
+    fontWeight: "600",
+  },
+}));

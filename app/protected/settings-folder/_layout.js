@@ -1,22 +1,28 @@
 import { Stack } from 'expo-router';
+import { useI18n } from '../../../lib/i18n';
+import { useTheme } from '../../../lib/theme-context';
 
 export default function SettingsLayout() {
+  const { colors: COLORS } = useTheme();
+  const { t } = useI18n();
   return (
     <Stack
       screenOptions={{
         headerStyle: {
-          backgroundColor: '#121212', // Dark background for headers
+          backgroundColor: COLORS.background, // Dark background for headers
         },
-        headerTintColor: '#FFFFFF', // White text/icons for header
+        headerTintColor: COLORS.text, // White text/icons for header
         headerTitleStyle: {
           fontWeight: 'bold',
         },
+        headerShadowVisible: false,
+        contentStyle: { backgroundColor: COLORS.background },
       }}
     >
       <Stack.Screen name="settings" options={{ headerShown: false }} />
-      <Stack.Screen name="feedback" options={{ title: 'Feedback' }} />
-      <Stack.Screen name="privacy-policy" options={{ title: 'Privacy Policy' }} />
-      <Stack.Screen name="terms-conditions" options={{ title: 'Terms & Conditions' }} />
+      <Stack.Screen name="feedback" options={{ title: t('settings.sendFeedback') }} />
+      <Stack.Screen name="privacy-policy" options={{ title: t('settings.privacyPolicy') }} />
+      <Stack.Screen name="terms-conditions" options={{ title: t('settings.termsOfUse') }} />
     </Stack>
   );
 }

@@ -1,999 +1,881 @@
-import { FontAwesome, MaterialIcons } from "@expo/vector-icons";
-import AsyncStorage from "@react-native-async-storage/async-storage";
-import { createMaterialTopTabNavigator } from "@react-navigation/material-top-tabs";
+import { MaterialIcons } from "@expo/vector-icons";
 import { Image } from "expo-image";
-import { Link, useNavigation, useRouter } from "expo-router";
-import { useCallback, useEffect, useState } from "react";
+import { LinearGradient } from "expo-linear-gradient";
+import { useFocusEffect, useNavigation, useRouter } from "expo-router";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  ActivityIndicator,
+  Alert,
+  Animated,
   Dimensions,
+  Pressable,
   RefreshControl,
   ScrollView,
   StyleSheet,
   Text,
-  TouchableOpacity,
   View,
 } from "react-native";
+import FavoriteStar from "../../../components/FavoriteStar";
+import InterestCheck from "../../../components/InterestCheck";
+import { api, getSession } from "../../../lib/api";
+import { translate, useI18n } from "../../../lib/i18n";
+import { favorites, interests } from "../../../lib/toggles";
+import { makeStyles, useTheme } from "../../../lib/theme-context";
 
-const Tab = createMaterialTopTabNavigator();
+const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get("window");
+const GRID_GAP = 2;
+const TILE_WIDTH = (SCREEN_WIDTH - GRID_GAP * 2) / 3;
+const TILE_HEIGHT = (TILE_WIDTH * 5) / 4; // 4:5, same as posts in the feed
+
+const TABS = [
+  { key: "posts", labelKey: "profile.posts", icon: "grid-on", activeIcon: "grid-on" },
+  { key: "favorites", labelKey: "profile.favorites", icon: "star-border", activeIcon: "star" },
+  { key: "interested", labelKey: "profile.interested", icon: "event-available", activeIcon: "event-available" },
+];
+
+// ── Data loaders for each tab ────────────────────
+
+async function loadPosts(userId) {
+  const data = await api("/api/posts");
+  return data
+    .filter((post) => String(post.user_id) === String(userId))
+    .map((post) => ({ id: String(post.id), image: post.post_image }));
+}
+
+async function loadFavorites() {
+  const data = await api("/api/venues");
+  favorites.seed(data, "is_favorite");
+  return data
+    .filter((venue) => venue.is_favorite)
+    .map((venue) => ({
+      id: String(venue.id),
+      title: venue.title || translate("venue.fallbackTitle"),
+      subtitle: venue.address || translate("venue.noAddress"),
+      meta: venue.open_hours || translate("venue.defaultHours"),
+      image: venue.photo_ids[0] || null,
+    }));
+}
+
+async function loadInterested() {
+  const data = await api("/api/events");
+  interests.seed(data, "is_interested");
+
+  // Look each venue up once, even if several events share it
+  const venueNames = new Map();
+  const venueName = async (venueId) => {
+    if (!venueNames.has(venueId)) {
+      venueNames.set(
+        venueId,
+        api(`/api/venue/${venueId}`)
+          .then((venue) => venue.title || translate("event.unknownVenue"))
+          .catch(() => translate("event.unknownVenue")),
+      );
+    }
+    return venueNames.get(venueId);
+  };
+
+  return Promise.all(
+    data
+      .filter((event) => event.is_interested)
+      .map(async (event) => ({
+        id: String(event.id),
+        title: event.title || translate("event.fallbackTitle"),
+        subtitle: await venueName(event.venue_id),
+        meta: event.time || translate("event.noTime"),
+        image: event.photo_id || null,
+      })),
+  );
+}
+
+const TAB_LOADERS = {
+  posts: loadPosts,
+  favorites: loadFavorites,
+  interested: loadInterested,
+};
+
+// ── Small UI pieces ──────────────────────────────
+
+function Stat({ value, label, onPress }) {
+  const styles = useStyles();
+  return (
+    <Pressable
+      onPress={onPress}
+      style={({ pressed }) => [styles.stat, pressed && styles.pressed]}
+      accessibilityRole="button"
+      accessibilityLabel={`${value} ${label}`}
+    >
+      <Text style={styles.statValue}>{value ?? 0}</Text>
+      <Text style={styles.statLabel}>{label}</Text>
+    </Pressable>
+  );
+}
+
+function ActionButton({ label, onPress }) {
+  const styles = useStyles();
+  return (
+    <Pressable
+      onPress={onPress}
+      style={({ pressed }) => [styles.actionButton, pressed && styles.actionButtonPressed]}
+      accessibilityRole="button"
+    >
+      <Text style={styles.actionButtonText}>{label}</Text>
+    </Pressable>
+  );
+}
+
+function EmptyState({ icon, title, message, actionLabel, onAction }) {
+  const { colors: COLORS } = useTheme();
+  const styles = useStyles();
+  return (
+    <View style={styles.emptyState}>
+      <View style={styles.emptyIconCircle}>
+        <MaterialIcons name={icon} size={36} color={COLORS.text} />
+      </View>
+      <Text style={styles.emptyTitle}>{title}</Text>
+      <Text style={styles.emptyMessage}>{message}</Text>
+      {actionLabel && (
+        <Pressable
+          onPress={onAction}
+          style={({ pressed }) => [styles.emptyAction, pressed && styles.pressed]}
+          accessibilityRole="button"
+        >
+          <Text style={styles.emptyActionText}>{actionLabel}</Text>
+        </Pressable>
+      )}
+    </View>
+  );
+}
+
+function ImageOrPlaceholder({ uri, style, icon }) {
+  const { colors: COLORS } = useTheme();
+  const styles = useStyles();
+  if (!uri) {
+    return (
+      <View style={[style, styles.imagePlaceholder]}>
+        <MaterialIcons name={icon} size={24} color={COLORS.textSecondary} />
+      </View>
+    );
+  }
+  return <Image source={{ uri }} style={style} contentFit="cover" transition={200} />;
+}
+
+function ItemCard({ item, icon, onPress, toggle }) {
+  const styles = useStyles();
+  return (
+    <Pressable
+      onPress={onPress}
+      style={({ pressed }) => [styles.card, pressed && styles.cardPressed]}
+      accessibilityRole="button"
+      accessibilityLabel={item.title}
+    >
+      <ImageOrPlaceholder uri={item.image} style={styles.cardImage} icon={icon} />
+      <View style={styles.cardText}>
+        <Text style={styles.cardTitle} numberOfLines={1}>
+          {item.title}
+        </Text>
+        <Text style={styles.cardSubtitle} numberOfLines={1}>
+          {item.subtitle}
+        </Text>
+        <Text style={styles.cardMeta} numberOfLines={1}>
+          {item.meta}
+        </Text>
+      </View>
+      {toggle}
+    </Pressable>
+  );
+}
+
+// ── Screen ───────────────────────────────────────
 
 export default function Profile() {
+  const { colors: COLORS } = useTheme();
+  const { t } = useI18n();
+  const styles = useStyles();
   const navigation = useNavigation();
   const router = useRouter();
+  const [userId, setUserId] = useState(null);
   const [user, setUser] = useState(null);
   const [error, setError] = useState(null);
-  const [favoriteIds, setFavoriteIds] = useState([]);
-  const [interestedIds, setInterestedIds] = useState([]);
   const [refreshing, setRefreshing] = useState(false);
-  const apiUrl = "https://night-life-api.elevator-rand.workers.dev";
-  const imageDomain = `${apiUrl}/images`;
+  const [activeTab, setActiveTab] = useState("posts");
+  const [tabState, setTabState] = useState({}); // key → { items, loading, error }
+  const activeTabRef = useRef("posts");
+  const [indicatorX] = useState(() => new Animated.Value(0));
 
-  const fetchUser = async () => {
+  useEffect(() => {
+    navigation.setOptions({ headerShown: false });
+  }, [navigation]);
+
+  const fetchUser = useCallback(async () => {
     try {
-      const token = await AsyncStorage.getItem("token");
-      const userId = await AsyncStorage.getItem("userId");
-      if (!token || !userId) {
-        setError("No token or user ID found. Please log in again.");
-        return;
+      const session = await getSession();
+      if (!session) {
+        setError(t("api.loginAgain"));
+        return null;
       }
 
-      // Fetch user profile
-      const userResponse = await fetch(`${apiUrl}/api/user/${userId}`, {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-      });
+      // Counts and private lists come from the API
+      const userData = await api(`/api/user/${session.userId}`);
 
-      if (!userResponse.ok) {
-        setError(`Failed to fetch user profile: HTTP ${userResponse.status}`);
-        return;
-      }
-
-      const userData = await userResponse.json();
-      if (userData.error) {
-        setError("User profile not found in database.");
-        return;
-      }
-
-      // Fetch posts to count user-specific posts
-      const postsResponse = await fetch(`${apiUrl}/api/posts`, {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-      });
-
-      let postCount = 0;
-      if (postsResponse.ok) {
-        const postsData = await postsResponse.json();
-        postCount = postsData.filter(
-          (post) => post.user_id.toString() === userId.toString(),
-        ).length;
-      } else {
-        console.warn(`Failed to fetch posts: HTTP ${postsResponse.status}`);
-      }
-
-      const followersCount = userData.follower_ids
-        ? userData.follower_ids.split(",").filter((id) => id.trim() !== "")
-            .length
-        : 0;
-      const followingCount = userData.following_ids
-        ? userData.following_ids.split(",").filter((id) => id.trim() !== "")
-            .length
-        : 0;
-      const favIds = userData.favorite_ids
-        ? userData.favorite_ids
-            .split(",")
-            .map((id) => id.trim())
-            .filter(Boolean)
-        : [];
-      const intIds = userData.interested_ids
-        ? userData.interested_ids
-            .split(",")
-            .map((id) => id.trim())
-            .filter(Boolean)
-        : [];
-
+      favorites.seedIds(userData.favorite_ids ?? []);
+      interests.seedIds(userData.interested_ids ?? []);
+      setUserId(session.userId);
       setUser({
         name:
           `${userData.first_name || ""} ${userData.last_name || ""}`.trim() ||
-          "Unnamed User",
+          t("profile.unnamedUser"),
+        username: userData.username || "",
         bio: userData.bio_text || "",
-        profileImage: userData.profile_photo
-          ? `${imageDomain}/${userData.profile_photo}`
-          : "https://picsum.photos/800/600?random=11",
-        followers: followersCount,
-        following: followingCount,
-        posts: postCount,
+        profileImage: userData.profile_photo || null,
+        followers: userData.followers_count,
+        following: userData.following_count,
+        posts: userData.posts_count,
       });
-      setFavoriteIds(favIds);
-      setInterestedIds(intIds);
-    } catch (error) {
-      console.error("Error fetching user profile:", error);
-      setError("Error fetching user profile: Network or server issue.");
+      setError(null);
+      return session.userId;
+    } catch (err) {
+      console.error("Error fetching user profile:", err.message);
+      setError(
+        err.status === 0
+          ? t("common.cantConnect")
+          : t("profile.loadError"),
+      );
+      return null;
     }
-  };
+  }, [t]);
 
-  useEffect(() => {
-    navigation.setOptions({
-      headerShown: false,
-    });
-  }, [navigation]);
-
-  useEffect(() => {
-    fetchUser();
-  }, []);
-
-  const PostsScreen = ({ refreshTrigger }) => {
-    const [posts, setPosts] = useState([]);
-    const [loading, setLoading] = useState(true);
-    const [error, setError] = useState(null);
-    const router = useRouter();
-
-    const fetchUserPosts = async () => {
-      try {
-        setLoading(true);
-        setError(null);
-        const token = await AsyncStorage.getItem("token");
-        const userId = await AsyncStorage.getItem("userId");
-        if (!token || !userId) {
-          setError("Authentication token or user ID not found. Please log in.");
-          return;
-        }
-
-        console.log("PostsScreen userId:", userId); // Debug log
-
-        const response = await fetch(`${apiUrl}/api/posts`, {
-          method: "GET",
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
-          },
-        });
-
-        if (!response.ok) {
-          throw new Error(`Failed to fetch posts: ${response.status}`);
-        }
-
-        const data = await response.json();
-        console.log("PostsScreen API posts response:", data); // Debug log
-        const userPosts = data
-          .filter((post) => {
-            const match = post.user_id.toString() === userId.toString();
-            console.log(
-              `Post ${post.id}: user_id=${post.user_id}, currentUserId=${userId}, match=${match}`,
-            );
-            return match;
-          })
-          .map((post, index) => {
-            const imageUrl =
-              post.post_image ||
-              `https://picsum.photos/800/600?random=${index}`;
-            if (!post.post_image) {
-              console.warn(
-                `Post ${post.id} has no valid post_image, using placeholder: ${imageUrl}`,
-              );
-            }
-            return {
-              id: `${post.id}-${index}`,
-              url: imageUrl,
-              postId: post.id,
-              userId: userId.toString(), // Ensure userId is a string
-            };
-          });
-
-        setPosts(userPosts);
-      } catch (err) {
-        console.error("Error fetching user posts:", err);
-        setError("Failed to load posts. Please try again.");
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    useEffect(() => {
-      fetchUserPosts();
-    }, [refreshTrigger]);
-
-    const numColumns = 3;
-    const screenWidth = Dimensions.get("window").width - 20;
-    const imageWidth = (screenWidth - (numColumns - 1) * 2) / numColumns;
-    const imageHeight = (imageWidth * 5) / 4;
-
-    return (
-      <View style={[styles.container, { padding: 8 }]}>
-        {loading ? (
-          <Text style={styles.statusText}>Loading posts...</Text>
-        ) : error ? (
-          <Text style={styles.statusText}>{error}</Text>
-        ) : posts.length === 0 ? (
-          <Text style={styles.statusText}>No posts available</Text>
-        ) : (
-          <ScrollView
-            style={styles.gridScrollContainer}
-            contentContainerStyle={styles.gridContentContainer}
-            nestedScrollEnabled={true}
-          >
-            <View style={styles.gridContainer}>
-              {posts.map((item) => (
-                <TouchableOpacity
-                  key={item.id}
-                  style={[
-                    styles.gridImageContainer,
-                    { width: imageWidth, height: imageHeight },
-                  ]}
-                  onPress={() => {
-                    console.log(
-                      "Navigating to post-list with userId:",
-                      item.userId,
-                    ); // Debug log
-                    router.push({
-                      pathname: "/protected/profile-folder/post-list",
-                      params: { userId: item.userId },
-                    });
-                  }}
-                >
-                  <Image
-                    source={{ uri: item.url }}
-                    style={styles.gridImage}
-                    contentFit="cover"
-                    cachePolicy="none"
-                    backgroundColor="#808080"
-                    onError={(e) =>
-                      console.log(
-                        `Failed to load image ${item.url}:`,
-                        e.nativeEvent.error,
-                      )
-                    }
-                    onLoad={() => console.log(`Image loaded: ${item.url}`)}
-                  />
-                </TouchableOpacity>
-              ))}
-            </View>
-          </ScrollView>
-        )}
-      </View>
-    );
-  };
-
-  const FavoritesScreen = ({ refreshTrigger }) => {
-    const [venues, setVenues] = useState([]);
-    const [loading, setLoading] = useState(true);
-    const [error, setError] = useState(null);
-
-    const fetchFavoriteVenues = async () => {
-      try {
-        setLoading(true);
-        setError(null);
-        const token = await AsyncStorage.getItem("token");
-        if (!token) {
-          setError("Authentication token not found. Please log in.");
-          return;
-        }
-
-        const response = await fetch(`${apiUrl}/api/venues`, {
-          method: "GET",
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
-          },
-        });
-
-        if (!response.ok) {
-          throw new Error(`Failed to fetch venues: ${response.status}`);
-        }
-
-        const data = await response.json();
-        const favoriteVenues = data
-          .filter((venue) => favoriteIds.includes(venue.id.toString()))
-          .map((venue, index) => ({
-            id: venue.id.toString(),
-            title: venue.title || `Venue ${index + 1}`,
-            address: venue.address || "No address provided",
-            openHours: venue.open_hours || "Mon-Sun: 10AM-10PM",
-            image: venue.photo_ids
-              ? `${imageDomain}/${venue.photo_ids
-                  .split(",")
-                  .filter((id) => id.trim())[0]
-                  ?.trim()}`
-              : "https://picsum.photos/800/600?random=${index + 1}",
-          }));
-
-        setVenues(favoriteVenues);
-      } catch (err) {
-        console.error("Error fetching favorite venues:", err);
-        setError("Failed to load favorite venues. Please try again.");
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    useEffect(() => {
-      fetchFavoriteVenues();
-    }, [refreshTrigger]);
-
-    return (
-      <ScrollView style={[styles.container, { padding: 10 }]}>
-        {loading ? (
-          <Text style={styles.statusText}>Loading favorite venues...</Text>
-        ) : error ? (
-          <Text style={styles.statusText}>{error}</Text>
-        ) : venues.length === 0 ? (
-          <Text style={styles.statusText}>No favorite venues</Text>
-        ) : (
-          venues.map((venue) => (
-            <Link
-              href={`/protected/home/venueId/${venue.id}`}
-              key={venue.id}
-              asChild
-            >
-              <TouchableOpacity style={styles.postEvent}>
-                <Image
-                  source={{ uri: venue.image }}
-                  style={styles.postImageEvent}
-                  contentFit="cover"
-                  backgroundColor="#808080"
-                />
-                <View style={styles.textContainerEvent}>
-                  <View style={styles.textContentEvent}>
-                    <Text style={styles.postTitleEvent}>{venue.title}</Text>
-                    <Text style={styles.postBodyEvent}>{venue.address}</Text>
-                    <Text style={styles.postBodyEvent}>{venue.openHours}</Text>
-                  </View>
-                  <StarIcon
-                    venueId={venue.id}
-                    favoriteIds={favoriteIds}
-                    setFavoriteIds={setFavoriteIds}
-                  />
-                </View>
-              </TouchableOpacity>
-            </Link>
-          ))
-        )}
-      </ScrollView>
-    );
-  };
-
-  const InterestedScreen = ({ refreshTrigger }) => {
-    const [events, setEvents] = useState([]);
-    const [loading, setLoading] = useState(true);
-    const [error, setError] = useState(null);
-
-    const fetchInterestedEvents = async () => {
-      try {
-        setLoading(true);
-        setError(null);
-        const token = await AsyncStorage.getItem("token");
-        if (!token) {
-          setError("Authentication token not found. Please log in.");
-          return;
-        }
-
-        const response = await fetch(`${apiUrl}/api/events`, {
-          method: "GET",
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
-          },
-        });
-
-        if (!response.ok) {
-          throw new Error(`Failed to fetch events: ${response.status}`);
-        }
-
-        const data = await response.json();
-        const interestedEvents = await Promise.all(
-          data
-            .filter((event) => interestedIds.includes(event.id.toString()))
-            .map(async (event, index) => {
-              let venueName = "Unknown";
-              if (event.venue_id) {
-                try {
-                  const venueResponse = await fetch(
-                    `${apiUrl}/api/venue/${event.venue_id}`,
-                    {
-                      method: "GET",
-                      headers: {
-                        Authorization: `Bearer ${token}`,
-                        "Content-Type": "application/json",
-                      },
-                    },
-                  );
-                  if (venueResponse.ok) {
-                    const venueData = await venueResponse.json();
-                    venueName = venueData.title || "Unknown";
-                  } else {
-                    console.warn(
-                      `Failed to fetch venue ${event.venue_id}: ${venueResponse.status}`,
-                    );
-                  }
-                } catch (err) {
-                  console.warn(`Error fetching venue ${event.venue_id}:`, err);
-                }
-              }
-              return {
-                id: event.id.toString(),
-                title: event.title || `Event ${index + 1}`,
-                venueName,
-                time: event.time || "No time provided",
-                image: event.photo_ids
-                  ? `${imageDomain}/${event.photo_ids
-                      .split(",")
-                      .filter((id) => id.trim())[0]
-                      ?.trim()}`
-                  : "https://picsum.photos/200/200?random=${index + 1}",
-              };
-            }),
-        );
-
-        setEvents(interestedEvents);
-      } catch (err) {
-        console.error("Error fetching interested events:", err);
-        setError("Failed to load interested events. Please try again.");
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    useEffect(() => {
-      fetchInterestedEvents();
-    }, [refreshTrigger]);
-
-    return (
-      <ScrollView style={[styles.container, { padding: 10 }]}>
-        {loading ? (
-          <Text style={styles.statusText}>Loading interested events...</Text>
-        ) : error ? (
-          <Text style={styles.statusText}>{error}</Text>
-        ) : events.length === 0 ? (
-          <Text style={styles.statusText}>No interested events</Text>
-        ) : (
-          events.map((event) => (
-            <Link
-              href={`/protected/home/eventId/${event.id}`}
-              key={event.id}
-              asChild
-            >
-              <TouchableOpacity style={styles.postEvent}>
-                <Image
-                  source={{ uri: event.image }}
-                  style={styles.postImageEvent}
-                  contentFit="cover"
-                  backgroundColor="#808080"
-                />
-                <View style={styles.textContainerEvent}>
-                  <View style={styles.textContentEvent}>
-                    <Text style={styles.postTitleEvent}>{event.title}</Text>
-                    <Text style={styles.postBodyEvent}>{event.venueName}</Text>
-                    <Text style={styles.postTimeEvent}>{event.time}</Text>
-                  </View>
-                  <CheckIcon
-                    eventId={event.id}
-                    interestedIds={interestedIds}
-                    setInterestedIds={setInterestedIds}
-                  />
-                </View>
-              </TouchableOpacity>
-            </Link>
-          ))
-        )}
-      </ScrollView>
-    );
-  };
-
-  const PostsScreenWrapper = (props) => (
-    <PostsScreen {...props} refreshTrigger={refreshing} />
-  );
-
-  const FavoritesScreenWrapper = (props) => (
-    <FavoritesScreen {...props} refreshTrigger={refreshing} />
-  );
-
-  const InterestedScreenWrapper = (props) => (
-    <InterestedScreen {...props} refreshTrigger={refreshing} />
-  );
-
-  function StarIcon({ venueId, favoriteIds, setFavoriteIds }) {
-    const isStarred = favoriteIds.includes(String(venueId));
-
-    const toggleStar = async () => {
-      try {
-        const token = await AsyncStorage.getItem("token");
-        const userId = await AsyncStorage.getItem("userId");
-        if (!token || !userId) {
-          console.warn("Missing token or userId");
-          return;
-        }
-
-        const previousIds = [...favoriteIds];
-        const venueStr = String(venueId);
-        let newIds;
-
-        if (isStarred) {
-          newIds = favoriteIds.filter((id) => id !== venueStr);
-        } else {
-          newIds = [...favoriteIds, venueStr];
-        }
-
-        setFavoriteIds(newIds);
-
-        const newFavoriteStr = newIds.length > 0 ? newIds.join(",") : "";
-
-        const response = await fetch(`${apiUrl}/api/user/${userId}`, {
-          method: "PUT",
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            favorite_ids: newFavoriteStr,
-          }),
-        });
-
-        if (!response.ok) {
-          setFavoriteIds(previousIds);
-          console.error(
-            "Failed to update favorite_ids:",
-            await response.text(),
-          );
-          return;
-        }
-
-        const refetchResponse = await fetch(`${apiUrl}/api/user/${userId}`, {
-          method: "GET",
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
-          },
-        });
-
-        if (refetchResponse.ok) {
-          const updatedData = await refetchResponse.json();
-          const updatedIds = updatedData.favorite_ids
-            ? updatedData.favorite_ids
-                .split(",")
-                .map((id) => id.trim())
-                .filter(Boolean)
-            : [];
-          setFavoriteIds(updatedIds);
-        } else {
-          setFavoriteIds(previousIds);
-          console.error(
-            "Failed to refetch favorite_ids:",
-            await refetchResponse.text(),
-          );
-        }
-      } catch (error) {
-        setFavoriteIds(favoriteIds);
-        console.error("Error toggling star:", error);
-      }
-    };
-
-    return (
-      <TouchableOpacity onPress={toggleStar} style={styles.checkContainer}>
-        <Text
-          style={[
-            styles.starIcon,
-            { color: isStarred ? "#FFD700" : "#808080" },
-          ]}
-        >
-          ★
-        </Text>
-      </TouchableOpacity>
-    );
-  }
-
-  function CheckIcon({ eventId, interestedIds, setInterestedIds }) {
-    const isActive = interestedIds.includes(String(eventId));
-
-    const toggleCheck = async () => {
-      try {
-        const token = await AsyncStorage.getItem("token");
-        const userId = await AsyncStorage.getItem("userId");
-        if (!token || !userId) return;
-
-        const previousIds = [...interestedIds];
-        const eventStr = String(eventId);
-        let newIds = [...previousIds];
-
-        if (isActive) {
-          newIds = newIds.filter((id) => id !== eventStr);
-        } else {
-          if (!newIds.includes(eventStr)) {
-            newIds.push(eventStr);
-          }
-        }
-
-        setInterestedIds(newIds);
-
-        const newInterestedStr = newIds.length > 0 ? newIds.join(",") : "";
-
-        const response = await fetch(`${apiUrl}/api/user/${userId}`, {
-          method: "PUT",
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            interested_ids: newInterestedStr,
-          }),
-        });
-
-        if (response.ok) {
-          const refetchResponse = await fetch(`${apiUrl}/api/user/${userId}`, {
-            method: "GET",
-            headers: {
-              Authorization: `Bearer ${token}`,
-              "Content-Type": "application/json",
-            },
-          });
-
-          if (refetchResponse.ok) {
-            const updatedData = await refetchResponse.json();
-            const updatedIds = updatedData.interested_ids
-              ? updatedData.interested_ids
-                  .split(",")
-                  .map((id) => id.trim())
-                  .filter(Boolean)
-              : [];
-            setInterestedIds(updatedIds);
-          } else {
-            setInterestedIds(previousIds);
-            console.error(
-              "Failed to update interested_ids:",
-              await response.text(),
-            );
-          }
-        } else {
-          setInterestedIds(previousIds);
-          console.error(
-            "Failed to update interested_ids:",
-            await response.text(),
-          );
-        }
-      } catch (error) {
-        setInterestedIds(interestedIds);
-        console.error("Error toggling check:", error);
-      }
-    };
-
-    return (
-      <TouchableOpacity onPress={toggleCheck} style={styles.checkContainer}>
-        <FontAwesome
-          name="check-square"
-          size={32}
-          color={isActive ? "#0000FF" : "#808080"}
-        />
-      </TouchableOpacity>
-    );
-  }
-
-  const handleButtonPress = (buttonName) => {
-    if (buttonName === "Add Image") {
-      router.push("/protected/profile-folder/create-post");
-    } else {
-      console.log(`${buttonName} button pressed`);
+  // Loads a tab's items; cached items stay visible while it refreshes
+  const fetchTab = useCallback(async (key, id) => {
+    if (!id) return;
+    setTabState((prev) => ({
+      ...prev,
+      [key]: { items: prev[key]?.items ?? null, loading: true, error: null },
+    }));
+    try {
+      const items = await TAB_LOADERS[key](id);
+      setTabState((prev) => ({ ...prev, [key]: { items, loading: false, error: null } }));
+    } catch (err) {
+      console.error(`Error loading ${key}:`, err.message);
+      setTabState((prev) => ({
+        ...prev,
+        [key]: {
+          items: prev[key]?.items ?? null,
+          loading: false,
+          error: err.status === 0 ? t("profile.tabConnectError") : t("profile.tabLoadError"),
+        },
+      }));
     }
+  }, [t]);
+
+  // Long-press on a grid photo: confirm, delete the post, refresh counts + grid
+  const confirmDeletePost = (post) =>
+    Alert.alert(t("post.deleteTitle"), t("post.deleteMessage"), [
+      { text: t("common.cancel"), style: "cancel" },
+      {
+        text: t("common.delete"),
+        style: "destructive",
+        onPress: async () => {
+          try {
+            await api(`/api/posts/${post.id}`, { method: "DELETE" });
+            setTabState((prev) => ({
+              ...prev,
+              posts: {
+                ...prev.posts,
+                items: prev.posts.items.filter((item) => item.id !== post.id),
+              },
+            }));
+            fetchUser();
+          } catch (err) {
+            console.error("Delete post error:", err.message);
+            Alert.alert(t("common.deleteError"), t("common.pleaseTryAgain"));
+          }
+        },
+      },
+    ]);
+
+  // Refresh whenever the screen comes back into view (e.g. after editing the
+  // profile or creating a post)
+  useFocusEffect(
+    useCallback(() => {
+      fetchUser().then((id) => fetchTab(activeTabRef.current, id));
+    }, [fetchUser, fetchTab]),
+  );
+
+  const selectTab = (key) => {
+    const index = TABS.findIndex((tab) => tab.key === key);
+    Animated.spring(indicatorX, {
+      toValue: index * (SCREEN_WIDTH / TABS.length),
+      useNativeDriver: true,
+      speed: 20,
+      bounciness: 4,
+    }).start();
+    activeTabRef.current = key;
+    setActiveTab(key);
+    fetchTab(key, userId);
   };
 
-  const onRefresh = useCallback(() => {
+  const onRefresh = async () => {
     setRefreshing(true);
-    Promise.all([fetchUser()]).then(() => setRefreshing(false));
-  }, []);
+    const id = await fetchUser();
+    await fetchTab(activeTabRef.current, id);
+    setRefreshing(false);
+  };
 
-  if (error) {
+  const retry = () => {
+    setError(null);
+    onRefresh();
+  };
+
+  // ── Full-screen states ──
+
+  if (!user && error) {
     return (
-      <ScrollView
-        style={styles.container}
-        refreshControl={
-          <RefreshControl
-            refreshing={refreshing}
-            onRefresh={onRefresh}
-            tintColor="#BB86FC"
-            colors={["#BB86FC"]}
-          />
-        }
-      >
-        <Text style={styles.tabContentText}>{error}</Text>
-      </ScrollView>
+      <View style={styles.centered}>
+        <MaterialIcons name="cloud-off" size={48} color={COLORS.textSecondary} />
+        <Text style={styles.errorText}>{error}</Text>
+        <Pressable
+          onPress={retry}
+          style={({ pressed }) => [styles.retryButton, pressed && styles.pressed]}
+        >
+          <Text style={styles.retryButtonText}>{t("common.tryAgain")}</Text>
+        </Pressable>
+      </View>
     );
   }
 
   if (!user) {
     return (
-      <ScrollView
-        style={styles.container}
-        refreshControl={
-          <RefreshControl
-            refreshing={refreshing}
-            onRefresh={onRefresh}
-            tintColor="#BB86FC"
-            colors={["#BB86FC"]}
-          />
-        }
-      >
-        <Text style={styles.tabContentText}>Loading...</Text>
-      </ScrollView>
+      <View style={styles.centered}>
+        <ActivityIndicator size="large" color={COLORS.accent} />
+      </View>
     );
   }
+
+  // ── Tab content ──
+
+  const renderTabContent = () => {
+    const state = tabState[activeTab];
+    const items = state?.items;
+
+    if (!items && state?.error) {
+      return (
+        <View style={styles.tabMessage}>
+          <Text style={styles.errorText}>{state.error}</Text>
+          <Pressable
+            onPress={() => fetchTab(activeTab, userId)}
+            style={({ pressed }) => [styles.retryButton, pressed && styles.pressed]}
+          >
+            <Text style={styles.retryButtonText}>{t("common.tryAgain")}</Text>
+          </Pressable>
+        </View>
+      );
+    }
+
+    if (!items) {
+      return (
+        <View style={styles.tabMessage}>
+          <ActivityIndicator color={COLORS.accent} />
+        </View>
+      );
+    }
+
+    if (activeTab === "posts") {
+      if (items.length === 0) {
+        return (
+          <EmptyState
+            icon="photo-camera"
+            title={t("profile.noPosts")}
+            message={t("profile.noPostsHint")}
+            actionLabel={t("profile.createPost")}
+            onAction={() => router.push("/protected/profile-folder/create-post")}
+          />
+        );
+      }
+      return (
+        <View style={styles.grid}>
+          {items.map((post, index) => (
+            <Pressable
+              key={post.id}
+              onPress={() =>
+                router.push({
+                  pathname: "/protected/profile-folder/post-list",
+                  params: { userId: String(userId), postId: post.id },
+                })
+              }
+              onLongPress={() => confirmDeletePost(post)}
+              delayLongPress={350}
+              style={({ pressed }) => [
+                styles.tile,
+                (index + 1) % 3 !== 0 && { marginRight: GRID_GAP },
+                pressed && styles.pressed,
+              ]}
+              accessibilityRole="imagebutton"
+              accessibilityLabel={t("profile.openPost")}
+              accessibilityHint={t("profile.longPressDelete")}
+            >
+              <ImageOrPlaceholder uri={post.image} style={styles.tileImage} icon="image" />
+            </Pressable>
+          ))}
+        </View>
+      );
+    }
+
+    if (activeTab === "favorites") {
+      if (items.length === 0) {
+        return (
+          <EmptyState
+            icon="star-border"
+            title={t("profile.noFavorites")}
+            message={t("profile.noFavoritesHint")}
+            actionLabel={t("profile.exploreVenues")}
+            onAction={() => router.push("/protected/home")}
+          />
+        );
+      }
+      return (
+        <View style={styles.cardList}>
+          {items.map((venue) => (
+            <ItemCard
+              key={venue.id}
+              item={venue}
+              icon="storefront"
+              onPress={() => router.push(`/protected/home/venueId/${venue.id}`)}
+              toggle={
+                <FavoriteStar
+                  venueId={venue.id}
+                  style={styles.cardToggle}
+                  inactiveColor={COLORS.placeholder}
+                />
+              }
+            />
+          ))}
+        </View>
+      );
+    }
+
+    if (items.length === 0) {
+      return (
+        <EmptyState
+          icon="event-available"
+          title={t("profile.noEvents")}
+          message={t("profile.noEventsHint")}
+          actionLabel={t("profile.exploreEvents")}
+          onAction={() => router.push("/protected/home")}
+        />
+      );
+    }
+    return (
+      <View style={styles.cardList}>
+        {items.map((event) => (
+          <ItemCard
+            key={event.id}
+            item={event}
+            icon="event"
+            onPress={() => router.push(`/protected/home/eventId/${event.id}`)}
+            toggle={<InterestCheck eventId={event.id} style={styles.cardToggle} />}
+          />
+        ))}
+      </View>
+    );
+  };
+
+  // ── Layout ──
 
   return (
     <ScrollView
       style={styles.container}
-      contentContainerStyle={{ flexGrow: 1 }}
+      stickyHeaderIndices={[1]}
+      showsVerticalScrollIndicator={false}
       refreshControl={
         <RefreshControl
           refreshing={refreshing}
           onRefresh={onRefresh}
-          tintColor="#BB86FC"
-          colors={["#BB86FC"]}
+          tintColor={COLORS.accent}
+          colors={[COLORS.accent]}
         />
       }
     >
-      <View style={styles.profileHeader}>
-        <View style={styles.profileImageContainer}>
-          <Image
-            source={{ uri: user.profileImage }}
-            style={styles.profileImage}
-            contentFit="cover"
-            backgroundColor="#808080"
-          />
+      {/* Profile header */}
+      <View style={styles.header}>
+        <View style={styles.topBar}>
+          <Text style={styles.handle} numberOfLines={1}>
+            {user.username ? `@${user.username}` : user.name}
+          </Text>
+          <Pressable
+            onPress={() => router.push("/protected/profile-folder/create-post")}
+            hitSlop={10}
+            style={({ pressed }) => pressed && styles.pressed}
+            accessibilityRole="button"
+            accessibilityLabel={t("profile.createPost")}
+          >
+            <MaterialIcons name="add-box" size={28} color={COLORS.text} />
+          </Pressable>
         </View>
-        <View style={styles.textContainer}>
-          <Text style={styles.profileName}>{user.name}</Text>
-          <View style={styles.countsContainer}>
-            <View style={styles.countItem}>
-              <Text style={styles.countNumber}>{user.posts}</Text>
-              <Text style={styles.countLabel}>Posts</Text>
+
+        <View style={styles.identityRow}>
+          <LinearGradient
+            colors={[COLORS.accent, COLORS.accentPink]}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
+            style={styles.avatarRing}
+          >
+            <View style={styles.avatarInner}>
+              {user.profileImage ? (
+                <Image
+                  source={{ uri: user.profileImage }}
+                  style={styles.avatar}
+                  contentFit="cover"
+                  transition={200}
+                />
+              ) : (
+                <MaterialIcons name="person" size={52} color={COLORS.textSecondary} />
+              )}
             </View>
-            <Link href="/protected/profile-folder/follow" asChild>
-              <TouchableOpacity style={styles.countItem}>
-                <Text style={styles.countNumber}>{user.followers}</Text>
-                <Text style={styles.countLabel}>Followers</Text>
-              </TouchableOpacity>
-            </Link>
-            <Link href="/protected/profile-folder/follow" asChild>
-              <TouchableOpacity style={styles.countItem}>
-                <Text style={styles.countNumber}>{user.following}</Text>
-                <Text style={styles.countLabel}>Following</Text>
-              </TouchableOpacity>
-            </Link>
+          </LinearGradient>
+
+          <View style={styles.stats}>
+            <Stat value={user.posts} label={t("profile.posts")} onPress={() => selectTab("posts")} />
+            <Stat
+              value={user.followers}
+              label={t("profile.followers")}
+              onPress={() => router.push("/protected/profile-folder/follow")}
+            />
+            <Stat
+              value={user.following}
+              label={t("profile.following")}
+              onPress={() => router.push("/protected/profile-folder/follow")}
+            />
           </View>
         </View>
+
+        <Text style={styles.name}>{user.name}</Text>
+        {!!user.bio && <Text style={styles.bio}>{user.bio}</Text>}
+
+        <View style={styles.actions}>
+          <ActionButton
+            label={t("profile.editProfile")}
+            onPress={() => router.push("/protected/profile-folder/edit-profile")}
+          />
+          <ActionButton
+            label={t("profile.tickets")}
+            onPress={() => console.log("Tickets button pressed")}
+          />
+        </View>
       </View>
-      <Text style={styles.profileBio}>{user.bio}</Text>
-      <View style={styles.buttonContainer}>
-        <TouchableOpacity
-          style={styles.imageButton}
-          onPress={() => handleButtonPress("Add Image")}
-        >
-          <MaterialIcons name="add-a-photo" size={20} color="#FFFFFF" />
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.actionButton, { flex: 1, marginHorizontal: 5 }]}
-          onPress={() => router.push("/protected/profile-folder/edit-profile")}
-        >
-          <Text style={styles.buttonText}>Edit Profile</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.actionButton, { flex: 1, marginHorizontal: 5 }]}
-          onPress={() => handleButtonPress("Tickets")}
-        >
-          <Text style={styles.buttonText}>Tickets</Text>
-        </TouchableOpacity>
+
+      {/* Sticky tab bar – React Native replaces the style of a sticky child,
+          so the row layout lives on an inner view */}
+      <View style={styles.tabBarSticky}>
+        <View style={styles.tabBar}>
+          {TABS.map((tab) => {
+            const isActive = tab.key === activeTab;
+            return (
+              <Pressable
+                key={tab.key}
+                onPress={() => selectTab(tab.key)}
+                style={styles.tabButton}
+                accessibilityRole="tab"
+                accessibilityState={{ selected: isActive }}
+                accessibilityLabel={t(tab.labelKey)}
+              >
+                <MaterialIcons
+                  name={isActive ? tab.activeIcon : tab.icon}
+                  size={24}
+                  color={isActive ? COLORS.text : COLORS.textSecondary}
+                />
+                <Text style={[styles.tabLabel, isActive && styles.tabLabelActive]}>
+                  {t(tab.labelKey)}
+                </Text>
+              </Pressable>
+            );
+          })}
+          <Animated.View
+            style={[styles.tabIndicator, { transform: [{ translateX: indicatorX }] }]}
+          />
+        </View>
       </View>
-      <Tab.Navigator
-        screenOptions={{
-          tabBarPosition: "top",
-          swipeEnabled: true,
-          tabBarStyle: {
-            backgroundColor: "#1E1E1E",
-            borderBottomColor: "#333333",
-          },
-          tabBarLabelStyle: {
-            fontSize: 12,
-            fontWeight: "600",
-            color: "#FFFFFF",
-          },
-          tabBarActiveTintColor: "#BB86FC",
-          tabBarInactiveTintColor: "#8E8E93",
-          tabBarIndicatorStyle: {
-            backgroundColor: "#BB86FC",
-          },
-        }}
-      >
-        <Tab.Screen
-          name="Posts"
-          component={PostsScreenWrapper}
-          options={{ title: "Posts" }}
-        />
-        <Tab.Screen
-          name="Favorites"
-          component={FavoritesScreenWrapper}
-          options={{ title: "Favorites" }}
-        />
-        <Tab.Screen
-          name="Interested"
-          component={InterestedScreenWrapper}
-          options={{ title: "Interested" }}
-        />
-      </Tab.Navigator>
+
+      {/* Active tab */}
+      <View style={styles.tabContent}>{renderTabContent()}</View>
     </ScrollView>
   );
 }
 
-const styles = StyleSheet.create({
+const useStyles = makeStyles((COLORS) => ({
   container: {
     flex: 1,
-    backgroundColor: "#121212",
+    backgroundColor: COLORS.background,
   },
-  profileHeader: {
-    flexDirection: "row",
-    alignItems: "flex-start",
-    marginLeft: 20,
-    marginTop: 20,
-    marginBottom: 10,
-  },
-  profileImageContainer: {
-    width: 120,
-    height: 120,
-    borderRadius: 60,
-  },
-  profileImage: {
-    ...StyleSheet.absoluteFillObject,
-    borderRadius: 60,
-  },
-  textContainer: {
-    marginLeft: 20,
+  centered: {
     flex: 1,
-  },
-  profileName: {
-    fontSize: 22,
-    fontWeight: "bold",
-    color: "#FFFFFF",
-  },
-  profileBio: {
-    fontSize: 15,
-    fontWeight: "bold",
-    color: "#E0E0E0",
-    marginLeft: 20,
-    marginBottom: 10,
-  },
-  countsContainer: {
-    flexDirection: "row",
-    justifyContent: "flex-start",
-    marginTop: 10,
-    marginBottom: 10,
-  },
-  countItem: {
+    backgroundColor: COLORS.background,
     alignItems: "center",
-    marginRight: 20,
-  },
-  countNumber: {
-    fontSize: 18,
-    fontWeight: "bold",
-    color: "#FFFFFF",
-  },
-  countLabel: {
-    fontSize: 14,
-    color: "#E0E0E0",
-  },
-  buttonContainer: {
-    flexDirection: "row",
-    marginHorizontal: 20,
-    marginBottom: 10,
-    alignItems: "center",
-  },
-  imageButton: {
-    backgroundColor: "#1E1E1E",
-    paddingVertical: 8,
-    paddingHorizontal: 8,
-    borderRadius: 8,
     justifyContent: "center",
+    padding: 24,
+  },
+  pressed: {
+    opacity: 0.6,
+  },
+
+  // Header
+  header: {
+    paddingHorizontal: 16,
+    paddingBottom: 16,
+    backgroundColor: COLORS.background,
+  },
+  topBar: {
+    flexDirection: "row",
     alignItems: "center",
-    width: 36,
-    marginHorizontal: 5,
+    justifyContent: "space-between",
+    paddingVertical: 12,
+  },
+  handle: {
+    flex: 1,
+    color: COLORS.text,
+    fontSize: 20,
+    fontWeight: "700",
+    marginRight: 12,
+  },
+  identityRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginTop: 4,
+  },
+  avatarRing: {
+    width: 92,
+    height: 92,
+    borderRadius: 46,
+    padding: 3,
+  },
+  avatarInner: {
+    flex: 1,
+    borderRadius: 43,
+    backgroundColor: COLORS.surface,
+    borderWidth: 3,
+    borderColor: COLORS.background,
+    alignItems: "center",
+    justifyContent: "center",
+    overflow: "hidden",
+  },
+  avatar: {
+    width: "100%",
+    height: "100%",
+  },
+  stats: {
+    flex: 1,
+    flexDirection: "row",
+    justifyContent: "space-around",
+    marginLeft: 12,
+  },
+  stat: {
+    alignItems: "center",
+    paddingVertical: 6,
+    paddingHorizontal: 4,
+    minWidth: 64,
+  },
+  statValue: {
+    color: COLORS.text,
+    fontSize: 18,
+    fontWeight: "700",
+  },
+  statLabel: {
+    color: COLORS.textSecondary,
+    fontSize: 13,
+    marginTop: 2,
+  },
+  name: {
+    color: COLORS.text,
+    fontSize: 15,
+    fontWeight: "600",
+    marginTop: 12,
+  },
+  bio: {
+    color: COLORS.text,
+    fontSize: 14,
+    lineHeight: 20,
+    marginTop: 4,
+  },
+  actions: {
+    flexDirection: "row",
+    gap: 8,
+    marginTop: 16,
   },
   actionButton: {
-    backgroundColor: "#1E1E1E",
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    borderRadius: 8,
+    flex: 1,
+    backgroundColor: COLORS.surface,
+    borderRadius: 10,
+    paddingVertical: 9,
     alignItems: "center",
-    justifyContent: "center",
   },
-  buttonText: {
+  actionButtonPressed: {
+    backgroundColor: COLORS.surfacePressed,
+  },
+  actionButtonText: {
+    color: COLORS.text,
     fontSize: 14,
-    color: "#FFFFFF",
-    fontWeight: "500",
+    fontWeight: "600",
   },
+
+  // Tab bar
+  tabBarSticky: {
+    backgroundColor: COLORS.background,
+  },
+  tabBar: {
+    flexDirection: "row",
+    backgroundColor: COLORS.background,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderColor: COLORS.border,
+  },
+  tabButton: {
+    flex: 1,
+    alignItems: "center",
+    paddingVertical: 10,
+  },
+  tabLabel: {
+    color: COLORS.textSecondary,
+    fontSize: 11,
+    marginTop: 2,
+  },
+  tabLabelActive: {
+    color: COLORS.text,
+    fontWeight: "600",
+  },
+  tabIndicator: {
+    position: "absolute",
+    bottom: 0,
+    left: 0,
+    width: SCREEN_WIDTH / TABS.length,
+    height: 2,
+    backgroundColor: COLORS.accent,
+  },
+
+  // Tab content
   tabContent: {
-    padding: 20,
+    minHeight: SCREEN_HEIGHT * 0.5,
+    paddingTop: GRID_GAP,
+  },
+  tabMessage: {
     alignItems: "center",
-    flex: 1,
-    backgroundColor: "#121212",
+    paddingTop: 48,
+    paddingHorizontal: 24,
   },
-  tabContentText: {
-    fontSize: 18,
-    color: "#FFFFFF",
-  },
-  postEvent: {
-    flexDirection: "row",
-    height: 100,
-    width: "100%",
-    marginBottom: 10,
-    backgroundColor: "#1E1E1E",
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: "#333333",
-    padding: 10,
-  },
-  postImageEvent: {
-    width: 80,
-    height: "100%",
-    borderRadius: 8,
-  },
-  textContainerEvent: {
-    flex: 1,
-    paddingLeft: 10,
-    flexDirection: "row",
-    alignItems: "center",
-  },
-  textContentEvent: {
-    flex: 1,
-  },
-  checkContainer: {
-    paddingRight: 10,
-  },
-  starIcon: {
-    fontSize: 32,
-    textShadowColor: "rgba(0, 0, 0, 0.75)",
-    textShadowOffset: { width: -1, height: 1 },
-    textShadowRadius: 2,
-  },
-  postTitleEvent: {
-    fontSize: 16,
-    fontWeight: "bold",
-    color: "#FFFFFF",
-  },
-  postBodyEvent: {
-    fontSize: 12,
-    color: "#E0E0E0",
-    marginTop: 5,
-  },
-  postTimeEvent: {
-    fontSize: 12,
-    color: "#E0E0E0",
-    marginTop: 5,
-  },
-  statusText: {
-    fontSize: 18,
-    color: "#FFFFFF",
-    textAlign: "center",
-    marginTop: 20,
-  },
-  gridScrollContainer: {
-    flex: 1,
-  },
-  gridContentContainer: {
-    paddingBottom: 20,
-  },
-  gridContainer: {
+  grid: {
     flexDirection: "row",
     flexWrap: "wrap",
   },
-  gridImageContainer: {
-    margin: 1,
-    borderRadius: 8,
-    overflow: "hidden",
-    backgroundColor: "#1E1E1E",
-    borderWidth: 1,
-    borderColor: "#333333",
+  tile: {
+    width: TILE_WIDTH,
+    height: TILE_HEIGHT,
+    marginBottom: GRID_GAP,
+    backgroundColor: COLORS.surface,
   },
-  gridImage: {
+  tileImage: {
     width: "100%",
     height: "100%",
   },
-});
+  imagePlaceholder: {
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: COLORS.surface,
+  },
+  cardList: {
+    padding: 12,
+    gap: 10,
+  },
+  card: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: COLORS.surface,
+    borderRadius: 14,
+    padding: 10,
+  },
+  cardPressed: {
+    backgroundColor: COLORS.surfacePressed,
+  },
+  cardImage: {
+    width: 64,
+    height: 64,
+    borderRadius: 10,
+  },
+  cardText: {
+    flex: 1,
+    marginLeft: 12,
+  },
+  cardTitle: {
+    color: COLORS.text,
+    fontSize: 15,
+    fontWeight: "600",
+  },
+  cardSubtitle: {
+    color: COLORS.textSecondary,
+    fontSize: 13,
+    marginTop: 3,
+  },
+  cardMeta: {
+    color: COLORS.accent,
+    fontSize: 12,
+    marginTop: 3,
+  },
+  cardToggle: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+
+  // Empty / error states
+  emptyState: {
+    alignItems: "center",
+    paddingTop: 48,
+    paddingHorizontal: 32,
+  },
+  emptyIconCircle: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    borderWidth: 2,
+    borderColor: COLORS.text,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  emptyTitle: {
+    color: COLORS.text,
+    fontSize: 20,
+    fontWeight: "700",
+    marginTop: 16,
+  },
+  emptyMessage: {
+    color: COLORS.textSecondary,
+    fontSize: 14,
+    textAlign: "center",
+    marginTop: 6,
+    lineHeight: 20,
+  },
+  emptyAction: {
+    marginTop: 16,
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+  },
+  emptyActionText: {
+    color: COLORS.accent,
+    fontSize: 15,
+    fontWeight: "600",
+  },
+  errorText: {
+    color: COLORS.textSecondary,
+    fontSize: 15,
+    textAlign: "center",
+    marginTop: 12,
+  },
+  retryButton: {
+    marginTop: 16,
+    backgroundColor: COLORS.surface,
+    borderRadius: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 20,
+  },
+  retryButtonText: {
+    color: COLORS.text,
+    fontSize: 14,
+    fontWeight: "600",
+  },
+}));

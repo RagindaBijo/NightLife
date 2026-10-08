@@ -1,23 +1,27 @@
 import { StyleSheet, Text, View } from 'react-native';
+import { useI18n } from '../../../../lib/i18n';
+import { makeStyles } from '../../../../lib/theme-context';
 
 export default function Followers() {
+  const styles = useStyles();
+  const { t } = useI18n();
   return (
     <View style={styles.container}>
-      <Text style={styles.text}>Followers Page</Text>
+      <Text style={styles.text}>{t('follow.followersPage')}</Text>
       {/* Add your followers list or content here */}
     </View>
   );
 }
 
-const styles = StyleSheet.create({
+const useStyles = makeStyles((COLORS) => ({
   container: {
     flex: 1,
-    backgroundColor: '#121212',
+    backgroundColor: COLORS.background,
     alignItems: 'center',
     justifyContent: 'center',
   },
   text: {
     fontSize: 20,
-    color: '#FFFFFF',
+    color: COLORS.text,
   },
-});
+}));

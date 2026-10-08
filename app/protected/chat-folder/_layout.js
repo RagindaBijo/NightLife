@@ -1,18 +1,22 @@
 import { Stack } from 'expo-router';
+import { useI18n } from '../../../lib/i18n';
+import { useTheme } from '../../../lib/theme-context';
 
 export default function ProtectedLayout() {
+  const { colors: COLORS } = useTheme();
+  const { t } = useI18n();
   return (
     <Stack
       screenOptions={{
         headerStyle: {
-          backgroundColor: '#121212', // Dark background
+          backgroundColor: COLORS.background, // Dark background
         },
-        headerTintColor: '#FFFFFF', // White back arrow
+        headerTintColor: COLORS.text, // White back arrow
         headerTitleStyle: {
           fontFamily: 'Helvetica Neue',
           fontSize: 16,
           fontWeight: '600',
-          color: '#FFFFFF',
+          color: COLORS.text,
         },
         headerShadowVisible: false, // Remove shadow for clean look
         headerBackTitleVisible: false, // Remove back button text
@@ -21,7 +25,7 @@ export default function ProtectedLayout() {
      
       <Stack.Screen
         name="chat"
-        options={{ title: 'Messages' }}
+        options={{ title: t('chat.messages') }}
       />
       <Stack.Screen
         name="[chatId]"

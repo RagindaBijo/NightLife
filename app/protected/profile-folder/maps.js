@@ -1,488 +1,508 @@
-import { MaterialIcons } from '@expo/vector-icons';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import Slider from '@react-native-community/slider';
-import * as Location from 'expo-location';
-import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { Alert, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
-import MapView, { Marker } from 'react-native-maps';
-import RNModal from 'react-native-modal';
+import { MaterialCommunityIcons, MaterialIcons } from "@expo/vector-icons";
+import * as Location from "expo-location";
+import { useLocalSearchParams, useRouter } from "expo-router";
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  ActivityIndicator,
+  Keyboard,
+  Linking,
+  Platform,
+  Pressable,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from "react-native";
+import MapView from "react-native-maps";
+import { setPickedLocation } from "../../../lib/locationPick";
+import { useI18n } from "../../../lib/i18n";
+import { makeStyles, useTheme } from "../../../lib/theme-context";
 
-export default function Maps() {
-  const { selectLocation, currentLatLong } = useLocalSearchParams();
-  const router = useRouter();
-  const [location, setLocation] = useState(null);
-  const [errorMsg, setErrorMsg] = useState(null);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [selectedStyle, setSelectedStyle] = useState('All');
-  const [selectedRating, setSelectedRating] = useState('All');
-  const [selectedDistance, setSelectedDistance] = useState(25.5);
-  const [filteredVenues, setFilteredVenues] = useState([]);
-  const [venues, setVenues] = useState([]);
-  const [isFilterModalVisible, setFilterModalVisible] = useState(false);
-  const [selectedMarker, setSelectedMarker] = useState(null);
-  const apiUrl = 'https://night-life-api.elevator-rand.workers.dev';
-  const [lastFetch, setLastFetch] = useState(0);
-  const debounceTimeout = useRef(null);
+// Tbilisi – used when there's no saved location and no GPS
+const DEFAULT_CENTER = { latitude: 41.6938, longitude: 44.8015 };
+const ZOOM = { latitudeDelta: 0.01, longitudeDelta: 0.01 };
 
-  const calculateDistance = useCallback((lat1, lon1, lat2, lon2) => {
-    const R = 6371;
-    const dLat = ((lat2 - lat1) * Math.PI) / 180;
-    const dLon = ((lon2 - lon1) * Math.PI) / 180;
-    const a =
-      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-      Math.cos((lat1 * Math.PI) / 180) *
-        Math.cos((lat2 * Math.PI) / 180) *
-        Math.sin(dLon / 2) * Math.sin(dLon / 2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-    return R * c;
-  }, []);
+const NOMINATIM = "https://nominatim.openstreetmap.org";
+const NOMINATIM_HEADERS = { "Accept-Language": "en", "User-Agent": "NightLifeApp/1.0" };
 
-  const reverseGeocode = useCallback(async (lat, lon) => {
-    try {
-      const response = await fetch(
-        `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}&zoom=18&addressdetails=1`
-      );
-      const data = await response.json();
-      return data.display_name || 'Unknown Address';
-    } catch (error) {
-      console.error('Reverse geocoding error:', error);
-      Alert.alert('Error', 'Failed to fetch address. Using coordinates only.');
-      return 'Unknown Address';
-    }
-  }, []);
+const DARK_MAP_STYLE = [
+  { elementType: "geometry", stylers: [{ color: "#16121F" }] },
+  { elementType: "labels.text.fill", stylers: [{ color: "#8C85A3" }] },
+  { elementType: "labels.text.stroke", stylers: [{ color: "#16121F" }] },
+  { featureType: "poi", stylers: [{ visibility: "off" }] },
+  { featureType: "road", elementType: "geometry", stylers: [{ color: "#262036" }] },
+  { featureType: "road.highway", elementType: "geometry", stylers: [{ color: "#332B47" }] },
+  { featureType: "transit", stylers: [{ visibility: "off" }] },
+  { featureType: "water", elementType: "geometry", stylers: [{ color: "#0E1626" }] },
+];
 
-  const fetchVenues = useCallback(async () => {
-    const now = Date.now();
-    if (now - lastFetch < 1000) return;
-    setLastFetch(now);
+function parseLatLong(value) {
+  const [lat, lon] = (value || "").split(",").map((part) => parseFloat(part));
+  if (isNaN(lat) || isNaN(lon) || (lat === 0 && lon === 0)) return null;
+  return { latitude: lat, longitude: lon };
+}
 
-    try {
-      const token = await AsyncStorage.getItem('token');
-      if (!token) {
-        Alert.alert('Error', 'No token found. Please log in.');
-        return;
-      }
+const reverseGeocode = ({ latitude, longitude }) =>
+  fetch(
+    `${NOMINATIM}/reverse?format=json&lat=${latitude}&lon=${longitude}&zoom=18&addressdetails=1`,
+    { headers: NOMINATIM_HEADERS },
+  )
+    .then((response) => response.json())
+    .then((data) => data.display_name || null);
 
-      const response = await fetch(`${apiUrl}/api/venues`, {
-        method: 'GET',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        const parsedVenues = data.map((venue) => {
-          let latitude = null;
-          let longitude = null;
-          if (venue.lat_long) {
-            const [lat, lon] = venue.lat_long.split(',').map(coord => parseFloat(coord.trim()));
-            if (!isNaN(lat) && !isNaN(lon)) {
-              latitude = lat;
-              longitude = lon;
-            }
-          }
-          return {
-            id: venue.id.toString(),
-            title: venue.title || 'Unknown Venue',
-            address: venue.address || 'No Address',
-            latitude,
-            longitude,
-            style: venue.style || 'Venue',
-            rating: venue.rating || 0,
-          };
-        }).filter(venue => venue.latitude !== null && venue.longitude !== null);
-        setVenues(parsedVenues);
-      } else {
-        console.error('Failed to fetch venues');
-        Alert.alert('Error', 'Failed to fetch venues from the database.');
-      }
-    } catch (error) {
-      console.error('Error fetching venues:', error);
-      Alert.alert('Error', 'Failed to fetch venues due to a network issue.');
-    }
-  }, [lastFetch]);
-
-  useEffect(() => {
-    (async () => {
-      let { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== 'granted') {
-        setErrorMsg('Permission to access location was denied');
-        Alert.alert('Location Permission', 'Please enable location access for better experience.');
-        return;
-      }
-
-      let loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
-      setLocation(loc);
-
-      let initialLat = loc?.coords.latitude || 41.6938;
-      let initialLong = loc?.coords.longitude || 44.8015;
-      let deltaLat = selectLocation === 'true' ? 0.01 : 0.0922;
-      let deltaLong = selectLocation === 'true' ? 0.01 : 0.0421;
-
-      if (selectLocation === 'true' && currentLatLong) {
-        const [latStr, longStr] = currentLatLong.split(',');
-        const lat = parseFloat(latStr?.trim());
-        const long = parseFloat(longStr?.trim());
-        if (!isNaN(lat) && !isNaN(long) && (lat !== 0 || long !== 0)) {
-          initialLat = lat;
-          initialLong = long;
-        }
-      }
-
-      setSelectedMarker({
-        latitude: initialLat,
-        longitude: initialLong,
-        latitudeDelta: deltaLat,
-        longitudeDelta: deltaLong,
-      });
-    })();
-  }, [selectLocation, currentLatLong]);
-
-  useFocusEffect(
-    useCallback(() => {
-      if (selectLocation !== 'true') {
-        fetchVenues();
-      }
-    }, [selectLocation, fetchVenues])
-  );
-
-  useEffect(() => {
-    let filtered = venues.filter(venue =>
-      venue.title.toLowerCase().includes(searchQuery.toLowerCase())
+const searchAddress = (query) =>
+  fetch(`${NOMINATIM}/search?format=json&limit=5&q=${encodeURIComponent(query)}`, {
+    headers: NOMINATIM_HEADERS,
+  })
+    .then((response) => response.json())
+    .then((data) =>
+      data.map((place) => ({
+        id: String(place.place_id),
+        label: place.display_name,
+        coordinate: { latitude: parseFloat(place.lat), longitude: parseFloat(place.lon) },
+      })),
     );
 
-    if (selectedStyle !== 'All') {
-      filtered = filtered.filter(venue => venue.style === selectedStyle);
-    }
+/**
+ * Location picker for the venue profile: move the map under the pin (or
+ * search an address), then confirm. The result goes back via lib/locationPick.
+ */
+export default function LocationPicker() {
+  const { colors: COLORS, scheme } = useTheme();
+  const { t } = useI18n();
+  const styles = useStyles();
+  const { currentLatLong } = useLocalSearchParams();
+  const router = useRouter();
+  const mapRef = useRef(null);
+  const geocodeTimer = useRef(null);
+  const searchTimer = useRef(null);
+  const [initialCenter] = useState(() => parseLatLong(currentLatLong) ?? DEFAULT_CENTER);
+  const [center, setCenter] = useState(initialCenter);
+  const [address, setAddress] = useState(null);
+  const [resolving, setResolving] = useState(true);
+  const [moving, setMoving] = useState(false);
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState([]);
+  const [searching, setSearching] = useState(false);
+  const [locationDenied, setLocationDenied] = useState(false);
 
-    if (selectedRating !== 'All') {
-      const minRating = parseFloat(selectedRating.split('+')[0]);
-      filtered = filtered.filter(venue => venue.rating >= minRating);
-    }
+  // Look up the address under the pin (debounced while the map moves)
+  const lookUpAddress = useCallback((coordinate) => {
+    clearTimeout(geocodeTimer.current);
+    geocodeTimer.current = setTimeout(() => {
+      reverseGeocode(coordinate)
+        .then((name) => setAddress(name))
+        .catch((err) => {
+          console.warn("Reverse geocoding failed:", err.message);
+          setAddress(null);
+        })
+        .finally(() => setResolving(false));
+    }, 500);
+  }, []);
 
-    if (selectedDistance < 25.5 && location) {
-      filtered = filtered.filter(venue => {
-        const distance = calculateDistance(
-          location.coords.latitude,
-          location.coords.longitude,
-          venue.latitude,
-          venue.longitude
-        );
-        return distance <= selectedDistance;
-      });
-    }
+  const resolveAddress = (coordinate) => {
+    setResolving(true);
+    lookUpAddress(coordinate);
+  };
 
-    setFilteredVenues(filtered);
-  }, [searchQuery, selectedStyle, selectedRating, selectedDistance, location, venues, calculateDistance]);
+  const moveTo = (coordinate) => {
+    mapRef.current?.animateToRegion({ ...coordinate, ...ZOOM }, 500);
+  };
 
-  const handleRegionChangeComplete = useCallback((region) => {
-    if (selectLocation === 'true') {
-      if (debounceTimeout.current) {
-        clearTimeout(debounceTimeout.current);
-      }
-      debounceTimeout.current = setTimeout(() => {
-        setSelectedMarker({
-          latitude: region.latitude,
-          longitude: region.longitude,
-          latitudeDelta: region.latitudeDelta,
-          longitudeDelta: region.longitudeDelta,
-        });
-      }, 100);
-    }
-  }, [selectLocation]);
+  const goToMyLocation = useCallback(
+    () =>
+      Location.requestForegroundPermissionsAsync()
+        .then(({ status }) => {
+          if (status !== "granted") {
+            setLocationDenied(true);
+            return null;
+          }
+          setLocationDenied(false);
+          return Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+        })
+        .then((position) => {
+          if (!position) return;
+          mapRef.current?.animateToRegion(
+            {
+              latitude: position.coords.latitude,
+              longitude: position.coords.longitude,
+              ...ZOOM,
+            },
+            500,
+          );
+        })
+        .catch((err) => console.warn("Couldn't get location:", err.message)),
+    [],
+  );
 
-  const handleConfirmLocation = useCallback(async () => {
-    if (!selectedMarker || !selectedMarker.latitude || !selectedMarker.longitude) {
-      Alert.alert('Error', 'No valid location selected. Please try again.');
+  // First address lookup; jump to the user's position if no location is saved yet
+  useEffect(() => {
+    lookUpAddress(initialCenter); // "resolving" already starts as true
+    if (!parseLatLong(currentLatLong)) goToMyLocation();
+    return () => {
+      clearTimeout(geocodeTimer.current);
+      clearTimeout(searchTimer.current);
+    };
+  }, [lookUpAddress, goToMyLocation, initialCenter, currentLatLong]);
+
+  const handleQueryChange = (text) => {
+    setQuery(text);
+    clearTimeout(searchTimer.current);
+    if (text.trim().length < 3) {
+      setResults([]);
+      setSearching(false);
       return;
     }
-    const { latitude, longitude } = selectedMarker;
-    const address = await reverseGeocode(latitude, longitude);
-    router.replace({
-      pathname: '/protected/profile-folder/venue-profile',
-      params: {
-        selectedLatLong: `${latitude.toFixed(6)},${longitude.toFixed(6)}`,
-        selectedAddress: encodeURIComponent(address),
-      },
+    setSearching(true);
+    searchTimer.current = setTimeout(() => {
+      searchAddress(text.trim())
+        .then(setResults)
+        .catch((err) => {
+          console.warn("Address search failed:", err.message);
+          setResults([]);
+        })
+        .finally(() => setSearching(false));
+    }, 600);
+  };
+
+  const chooseResult = (result) => {
+    Keyboard.dismiss();
+    setQuery("");
+    setResults([]);
+    moveTo(result.coordinate);
+  };
+
+  const confirm = () => {
+    setPickedLocation({
+      latLong: `${center.latitude.toFixed(6)},${center.longitude.toFixed(6)}`,
+      address: address || `${center.latitude.toFixed(5)}, ${center.longitude.toFixed(5)}`,
     });
-  }, [selectedMarker, reverseGeocode, router]);
-
-  const toggleFilterModal = useCallback(() => {
-    setFilterModalVisible(!isFilterModalVisible);
-  }, [isFilterModalVisible]);
-
-  const selectStyle = useCallback((style) => {
-    setSelectedStyle(style);
-  }, []);
-
-  const selectRating = useCallback((rating) => {
-    setSelectedRating(rating);
-  }, []);
-
-  const venueStyles = ['All', ...new Set(venues.map(v => v.style))];
-  const ratings = ['All', '4+', '3+', '2+'];
+    router.back();
+  };
 
   return (
     <View style={styles.container}>
-      {selectLocation !== 'true' && (
-        <View style={styles.controlsContainer}>
-          <View style={styles.searchContainer}>
-            <MaterialIcons name="search" size={24} color="#A0A0A0" style={styles.searchIcon} />
+      <MapView
+        ref={mapRef}
+        style={StyleSheet.absoluteFill}
+        initialRegion={{ ...initialCenter, ...ZOOM }}
+        showsUserLocation={!locationDenied}
+        showsMyLocationButton={false}
+        showsCompass={false}
+        toolbarEnabled={false}
+        userInterfaceStyle={scheme}
+        customMapStyle={Platform.OS === "android" && scheme === "dark" ? DARK_MAP_STYLE : undefined}
+        onRegionChange={() => !moving && setMoving(true)}
+        onRegionChangeComplete={(region) => {
+          setMoving(false);
+          const coordinate = { latitude: region.latitude, longitude: region.longitude };
+          setCenter(coordinate);
+          resolveAddress(coordinate);
+        }}
+        onPanDrag={() => Keyboard.dismiss()}
+      />
+
+      {/* Fixed pin in the middle of the map */}
+      <View style={styles.pinWrap} pointerEvents="none">
+        <View style={[styles.pin, moving && styles.pinLifted]}>
+          <MaterialCommunityIcons name="map-marker" size={48} color={COLORS.accent} />
+        </View>
+        <View style={[styles.pinShadow, moving && styles.pinShadowLifted]} />
+      </View>
+
+      {/* Top: back + address search */}
+      <View style={styles.top} pointerEvents="box-none">
+        <View style={styles.searchRow}>
+          <Pressable
+            onPress={() => router.back()}
+            hitSlop={8}
+            style={({ pressed }) => [styles.roundButton, pressed && styles.pressed]}
+            accessibilityRole="button"
+            accessibilityLabel={t("common.goBack")}
+          >
+            <MaterialIcons name="arrow-back" size={24} color={COLORS.text} />
+          </Pressable>
+          <View style={styles.searchBar}>
+            <MaterialIcons name="search" size={22} color={COLORS.textSecondary} />
             <TextInput
-              style={styles.searchBar}
-              value={searchQuery}
-              onChangeText={setSearchQuery}
-              placeholder="Search"
-              placeholderTextColor="#A0A0A0"
+              style={styles.searchInput}
+              value={query}
+              onChangeText={handleQueryChange}
+              placeholder={t("locationPicker.searchPlaceholder")}
+              placeholderTextColor={COLORS.placeholder}
+              selectionColor={COLORS.accent}
+              autoCorrect={false}
+              returnKeyType="search"
             />
-            <TouchableOpacity style={styles.filterButton} onPress={toggleFilterModal}>
-              <MaterialIcons name="filter-list" size={24} color="#F7F7F7" />
-            </TouchableOpacity>
+            {searching ? (
+              <ActivityIndicator size="small" color={COLORS.accent} />
+            ) : (
+              !!query && (
+                <Pressable onPress={() => handleQueryChange("")} hitSlop={10} accessibilityLabel={t("common.clearSearch")}>
+                  <MaterialIcons name="cancel" size={20} color={COLORS.textSecondary} />
+                </Pressable>
+              )
+            )}
           </View>
         </View>
-      )}
-      {selectLocation === 'true' && (
-        <View style={styles.controlsContainer}>
-          <TouchableOpacity style={styles.confirmButton} onPress={handleConfirmLocation}>
-            <Text style={styles.confirmButtonText}>Confirm Location</Text>
-          </TouchableOpacity>
-        </View>
-      )}
-      <RNModal
-        isVisible={isFilterModalVisible}
-        onBackdropPress={toggleFilterModal}
-        style={styles.modal}
-        backdropOpacity={0.5}
-      >
-        <View style={styles.modalContent}>
-          <Text style={styles.modalTitle}>Filter Venues</Text>
-          <ScrollView style={styles.modalScroll}>
-            <Text style={styles.filterLabel}>Style</Text>
-            <View style={styles.filterButtonContainer}>
-              {venueStyles.map(style => (
-                <TouchableOpacity
-                  key={style}
-                  style={[
-                    styles.filterOptionButton,
-                    selectedStyle === style && styles.filterOptionButtonSelected,
-                  ]}
-                  onPress={() => selectStyle(style)}
-                >
-                  <Text style={styles.filterOptionText}>{style}</Text>
-                </TouchableOpacity>
-              ))}
+
+        {results.length > 0 && (
+          <View style={styles.results}>
+            {results.map((result, index) => (
+              <Pressable
+                key={result.id}
+                onPress={() => chooseResult(result)}
+                style={({ pressed }) => [
+                  styles.result,
+                  index > 0 && styles.resultDivider,
+                  pressed && styles.resultPressed,
+                ]}
+                accessibilityRole="button"
+              >
+                <MaterialIcons name="place" size={20} color={COLORS.accent} />
+                <Text style={styles.resultText} numberOfLines={2}>
+                  {result.label}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+        )}
+      </View>
+
+      {/* Bottom: my location + chosen address + confirm */}
+      <View style={styles.bottom} pointerEvents="box-none">
+        <Pressable
+          onPress={() => (locationDenied ? Linking.openSettings() : goToMyLocation())}
+          style={({ pressed }) => [styles.roundButton, styles.locateButton, pressed && styles.pressed]}
+          accessibilityRole="button"
+          accessibilityLabel={locationDenied ? t("map.turnOnLocationSettings") : t("locationPicker.useMyLocation")}
+        >
+          <MaterialCommunityIcons
+            name={locationDenied ? "crosshairs-off" : "crosshairs-gps"}
+            size={22}
+            color={COLORS.text}
+          />
+        </Pressable>
+
+        <View style={styles.card}>
+          <Text style={styles.cardLabel}>{t("locationPicker.title")}</Text>
+          <View style={styles.addressRow}>
+            <View style={styles.addressIcon}>
+              <MaterialIcons name="storefront" size={20} color={COLORS.accent} />
             </View>
-            <Text style={styles.filterLabel}>Rating</Text>
-            <View style={styles.filterButtonContainer}>
-              {ratings.map(rating => (
-                <TouchableOpacity
-                  key={rating}
-                  style={{
-                    ...styles.filterOptionButton,
-                    ...(selectedRating === rating && styles.filterOptionButtonSelected),
-                  }}
-                  onPress={() => selectRating(rating)}
-                >
-                  <Text style={styles.filterOptionText}>{rating}</Text>
-                </TouchableOpacity>
-              ))}
+            <View style={styles.addressText}>
+              {resolving || moving ? (
+                <Text style={styles.addressPending}>{t("locationPicker.findingAddress")}</Text>
+              ) : (
+                <Text style={styles.address} numberOfLines={3}>
+                  {address || t("locationPicker.addressNotFound")}
+                </Text>
+              )}
+              <Text style={styles.coordinates}>
+                {center.latitude.toFixed(5)}, {center.longitude.toFixed(5)}
+              </Text>
             </View>
-            <Text style={styles.filterLabel}>Distance</Text>
-            <Text style={styles.sliderValue}>
-              {selectedDistance >= 25.5 ? '25+ km' : `${selectedDistance} km`}
-            </Text>
-            <Slider
-              style={styles.slider}
-              minimumValue={0.5}
-              maximumValue={25.5}
-              step={0.5}
-              value={selectedDistance}
-              onValueChange={setSelectedDistance}
-              minimumTrackTintColor="#3E92CC"
-              maximumTrackTintColor="#A0A0A0"
-              thumbTintColor="#FF6F61"
-            />
-          </ScrollView>
-          <TouchableOpacity style={styles.closeButton} onPress={toggleFilterModal}>
-            <Text style={styles.closeButtonText}>Close</Text>
-          </TouchableOpacity>
+          </View>
+          <Text style={styles.hint}>{t("locationPicker.hint")}</Text>
+          <Pressable
+            onPress={confirm}
+            disabled={resolving || moving}
+            style={({ pressed }) => [
+              styles.confirmButton,
+              (resolving || moving) && styles.confirmDisabled,
+              pressed && styles.pressed,
+            ]}
+            accessibilityRole="button"
+          >
+            <MaterialIcons name="check" size={20} color={COLORS.onAccent} />
+            <Text style={styles.confirmText}>{t("locationPicker.confirm")}</Text>
+          </Pressable>
         </View>
-      </RNModal>
-      <MapView
-        style={styles.map}
-        initialRegion={{
-          latitude: selectedMarker?.latitude || 41.6938,
-          longitude: selectedMarker?.longitude || 44.8015,
-          latitudeDelta: selectedMarker?.latitudeDelta || 0.0922,
-          longitudeDelta: selectedMarker?.longitudeDelta || 0.0421,
-        }}
-        region={selectLocation === 'true' && selectedMarker ? {
-          latitude: selectedMarker.latitude,
-          longitude: selectedMarker.longitude,
-          latitudeDelta: selectedMarker.latitudeDelta,
-          longitudeDelta: selectedMarker.longitudeDelta,
-        } : undefined}
-        onRegionChangeComplete={handleRegionChangeComplete}
-        showsUserLocation={true}
-        showsMyLocationButton={true}
-        mapType="standard"
-      >
-        {selectLocation !== 'true' &&
-          filteredVenues.map((venue) => (
-            <Marker
-              key={venue.id}
-              coordinate={{
-                latitude: venue.latitude,
-                longitude: venue.longitude,
-              }}
-              title={venue.title}
-              description={venue.address}
-              pinColor="#FF6F61"
-            />
-          ))}
-      </MapView>
-      {selectLocation === 'true' && (
-        <View style={styles.fixedPinContainer} pointerEvents="none">
-          <MaterialIcons name="location-pin" size={40} color="#26A69A" />
-        </View>
-      )}
-      {errorMsg && <Text style={styles.errorText}>{errorMsg}</Text>}
+      </View>
     </View>
   );
 }
 
-const styles = StyleSheet.create({
+const shadow = {
+  shadowColor: "#000",
+  shadowOpacity: 0.35,
+  shadowRadius: 8,
+  shadowOffset: { width: 0, height: 3 },
+  elevation: 6,
+};
+
+const useStyles = makeStyles((COLORS) => ({
   container: {
     flex: 1,
-    backgroundColor: '#0A3D62',
+    backgroundColor: COLORS.background,
   },
-  controlsContainer: {
-    padding: 10,
-    backgroundColor: '#0A3D62',
+  pressed: {
+    opacity: 0.7,
   },
-  searchContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#1B263B',
-    borderRadius: 8,
-    paddingHorizontal: 10,
+
+  // Pin
+  pinWrap: {
+    ...StyleSheet.absoluteFill,
+    alignItems: "center",
+    justifyContent: "center",
   },
-  searchIcon: {
-    marginRight: 8,
+  pin: {
+    marginBottom: 46, // the marker's tip sits on the map centre
+  },
+  pinLifted: {
+    transform: [{ translateY: -10 }],
+  },
+  pinShadow: {
+    position: "absolute",
+    width: 12,
+    height: 5,
+    borderRadius: 6,
+    backgroundColor: "rgba(0, 0, 0, 0.45)",
+  },
+  pinShadowLifted: {
+    width: 8,
+    opacity: 0.6,
+  },
+
+  // Top
+  top: {
+    position: "absolute",
+    top: 10,
+    left: 12,
+    right: 12,
+    gap: 8,
+  },
+  searchRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  roundButton: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: COLORS.surface,
+    alignItems: "center",
+    justifyContent: "center",
+    ...shadow,
   },
   searchBar: {
     flex: 1,
-    padding: 10,
-    color: '#F7F7F7',
-    fontSize: 16,
-    backgroundColor: '#1B263B',
-  },
-  filterButton: {
-    padding: 10,
-  },
-  confirmButton: {
-    backgroundColor: '#BB86FC',
-    borderRadius: 8,
-    paddingVertical: 10,
-    alignItems: 'center',
-  },
-  confirmButtonText: {
-    color: '#F7F7F7',
-    fontSize: 16,
-    fontWeight: 'bold',
-  },
-  modal: {
-    justifyContent: 'center',
-    margin: 20,
-  },
-  modalContent: {
-    backgroundColor: '#1B263B',
-    borderRadius: 12,
-    padding: 20,
-    borderWidth: 1,
-    borderColor: '#415A77',
-    maxHeight: '80%',
-  },
-  modalTitle: {
-    color: '#F7F7F7',
-    fontSize: 20,
-    fontWeight: 'bold',
-    marginBottom: 15,
-    textAlign: 'center',
-  },
-  modalScroll: {
-    maxHeight: 300,
-  },
-  filterLabel: {
-    color: '#F7F7F7',
-    fontSize: 16,
-    fontWeight: 'bold',
-    marginTop: 10,
-    marginBottom: 5,
-  },
-  filterButtonContainer: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    marginBottom: 10,
-  },
-  filterOptionButton: {
-    backgroundColor: '#415A77',
-    borderRadius: 8,
-    paddingVertical: 8,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    backgroundColor: COLORS.surface,
+    borderRadius: 16,
     paddingHorizontal: 12,
-    margin: 5,
+    ...shadow,
   },
-  filterOptionButtonSelected: {
-    backgroundColor: '#3E92CC',
+  searchInput: {
+    flex: 1,
+    color: COLORS.text,
+    fontSize: 16,
+    paddingVertical: 12,
   },
-  filterOptionText: {
-    color: '#F7F7F7',
+  results: {
+    backgroundColor: COLORS.surface,
+    borderRadius: 16,
+    overflow: "hidden",
+    ...shadow,
+  },
+  result: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+  },
+  resultDivider: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: COLORS.border,
+  },
+  resultPressed: {
+    backgroundColor: COLORS.surfacePressed,
+  },
+  resultText: {
+    flex: 1,
+    color: COLORS.text,
     fontSize: 14,
   },
-  slider: {
-    width: '100%',
-    height: 40,
-    marginBottom: 10,
+
+  // Bottom
+  bottom: {
+    position: "absolute",
+    left: 12,
+    right: 12,
+    bottom: 16,
+    gap: 10,
   },
-  sliderValue: {
-    color: '#F7F7F7',
-    fontSize: 16,
-    textAlign: 'center',
-    marginBottom: 10,
+  locateButton: {
+    alignSelf: "flex-end",
   },
-  closeButton: {
-    backgroundColor: '#FF6F61',
-    borderRadius: 8,
-    paddingVertical: 10,
-    alignItems: 'center',
-    marginTop: 15,
+  card: {
+    backgroundColor: COLORS.surface,
+    borderRadius: 20,
+    padding: 16,
+    gap: 10,
+    ...shadow,
   },
-  closeButtonText: {
-    color: '#F7F7F7',
-    fontSize: 16,
-    fontWeight: 'bold',
+  cardLabel: {
+    color: COLORS.textSecondary,
+    fontSize: 12,
+    fontWeight: "700",
+    textTransform: "uppercase",
+    letterSpacing: 0.6,
   },
-  map: {
+  addressRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 12,
+  },
+  addressIcon: {
+    width: 38,
+    height: 38,
+    borderRadius: 12,
+    backgroundColor: COLORS.accentSoft,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  addressText: {
     flex: 1,
+    gap: 4,
   },
-  fixedPinContainer: {
-    position: 'absolute',
-    top: '50%',
-    left: '50%',
-    marginLeft: -20,
-    marginTop: -40,
-    justifyContent: 'center',
-    alignItems: 'center',
+  address: {
+    color: COLORS.text,
+    fontSize: 15,
+    fontWeight: "600",
+    lineHeight: 20,
   },
-  errorText: {
-    position: 'absolute',
-    bottom: 20,
-    alignSelf: 'center',
-    color: '#E63946',
+  addressPending: {
+    color: COLORS.textSecondary,
+    fontSize: 15,
+  },
+  coordinates: {
+    color: COLORS.placeholder,
+    fontSize: 12,
+  },
+  hint: {
+    color: COLORS.textSecondary,
+    fontSize: 13,
+  },
+  confirmButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    backgroundColor: COLORS.accent,
+    borderRadius: 14,
+    paddingVertical: 14,
+  },
+  confirmDisabled: {
+    opacity: 0.45,
+  },
+  confirmText: {
+    color: COLORS.onAccent,
     fontSize: 16,
-    textAlign: 'center',
+    fontWeight: "800",
   },
-});
+}));

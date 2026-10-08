@@ -1,10 +1,11 @@
 import { Ionicons } from '@expo/vector-icons';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
 import { useState } from 'react';
 import { Keyboard, StyleSheet, Text, TextInput, TouchableOpacity, TouchableWithoutFeedback, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { api, saveSession } from '../lib/api';
+import { useI18n } from '../lib/i18n';
 
 export const options = {
   headerShown: false,
@@ -21,84 +22,69 @@ export default function UserAccountAdd() {
   const [showRepeatPassword, setShowRepeatPassword] = useState(false);
   const [error, setError] = useState('');
   const router = useRouter();
+  const { t } = useI18n();
 
   const togglePasswordVisibility = () => setShowPassword(!showPassword);
   const toggleRepeatPasswordVisibility = () => setShowRepeatPassword(!showRepeatPassword);
 
   const handleRegister = async () => {
     if (!email || !password || !repeatPassword || !username || !firstName || !lastName) {
-      setError('All fields are required');
+      setError(t('auth.allFieldsRequired'));
       return;
     }
     if (password !== repeatPassword) {
-      setError('Passwords do not match');
+      setError(t('auth.passwordsDontMatch'));
       return;
     }
+    // First API call: POST /api/register with email, password, user_type
+    let registerData;
     try {
-      // First API call: POST /api/register with email, password, user_type
-      const registerResponse = await fetch('https://night-life-api.elevator-rand.workers.dev/api/register', {
+      registerData = await api('/api/register', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          email,
-          password,
-          user_type: 1,
-        }),
+        body: { email, password, user_type: 1 },
+        auth: false,
       });
-      const registerData = await registerResponse.json();
-      if (!registerResponse.ok) {
-        setError(registerData.error || 'Registration failed');
-        return;
-      }
+    } catch (err) {
+      setError(err.status === 0 ? t('auth.networkError') : err.message || t('auth.registrationFailed'));
+      return;
+    }
 
-      // Save token, userId, userType
-      await AsyncStorage.setItem('token', registerData.token);
-      await AsyncStorage.setItem('userId', registerData.userId.toString());
-      await AsyncStorage.setItem('userType', registerData.userType.toString());
+    // Save token, userId, userType
+    await saveSession(registerData);
 
-      // Second API call: PUT /api/user/:id with username, first_name, last_name
-      const userId = registerData.userId;
-      const updateResponse = await fetch(`https://night-life-api.elevator-rand.workers.dev/api/user/${userId}`, {
+    // Second API call: PUT /api/user/:id with username, first_name, last_name
+    try {
+      await api(`/api/user/${registerData.userId}`, {
         method: 'PUT',
-        headers: { 
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${registerData.token}` 
-        },
-        body: JSON.stringify({
+        body: {
           username,
           first_name: firstName,
           last_name: lastName,
-        }),
+        },
       });
-      const updateData = await updateResponse.json();
-      if (!updateResponse.ok) {
-        setError(updateData.error || 'Profile update failed');
-        return;
-      }
-
       router.replace('/protected/home');
     } catch (err) {
-      setError('Network error');
+      setError(err.status === 0 ? t('auth.networkError') : err.message || t('auth.profileUpdateFailed'));
     }
   };
 
   return (
     <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
       <LinearGradient
-        colors={['#BB86FC', '#6200EE', '#8B008B', '#1E1E1E']}
+        colors={['#A78BFA', '#5B21B6', '#3B0764', '#1A1626']}
         style={styles.gradient}
         start={{ x: 0, y: 0 }}
         end={{ x: 1, y: 1 }}
       >
         <SafeAreaView style={styles.container}>
           <View style={styles.formContainer}>
-            <Text style={styles.headerTitle}>Create User Account</Text>
-            <Text style={styles.headerBody}>Enter your details to register!</Text>
+            <Text style={styles.headerTitle}>{t('auth.createUserAccount')}</Text>
+            <Text style={styles.headerBody}>{t('auth.createUserSubtitle')}</Text>
             <View style={styles.inputContainer}>
               <TextInput
                 style={styles.input}
-                placeholder="Email"
-                placeholderTextColor="#8E8E93"
+                placeholder={t('auth.email')}
+                placeholderTextColor="#8C85A3"
                 keyboardType="email-address"
                 value={email}
                 onChangeText={setEmail}
@@ -107,36 +93,36 @@ export default function UserAccountAdd() {
             <View style={styles.inputContainer}>
               <TextInput
                 style={styles.input}
-                placeholder="Password"
-                placeholderTextColor="#8E8E93"
+                placeholder={t('auth.password')}
+                placeholderTextColor="#8C85A3"
                 secureTextEntry={!showPassword}
                 value={password}
                 onChangeText={setPassword}
               />
               <TouchableOpacity style={styles.eyeIcon} onPress={togglePasswordVisibility}>
-                <Ionicons name={showPassword ? 'eye' : 'eye-off'} size={24} color="#8E8E93" />
+                <Ionicons name={showPassword ? 'eye' : 'eye-off'} size={24} color="#8C85A3" />
               </TouchableOpacity>
             </View>
             <View style={styles.inputContainer}>
               <TextInput
                 style={styles.input}
-                placeholder="Repeat Password"
-                placeholderTextColor="#8E8E93"
+                placeholder={t('auth.repeatPassword')}
+                placeholderTextColor="#8C85A3"
                 secureTextEntry={!showRepeatPassword}
                 value={repeatPassword}
                 onChangeText={setRepeatPassword}
               />
               <TouchableOpacity style={styles.eyeIcon} onPress={toggleRepeatPasswordVisibility}>
-                <Ionicons name={showRepeatPassword ? 'eye' : 'eye-off'} size={24} color="#8E8E93" />
+                <Ionicons name={showRepeatPassword ? 'eye' : 'eye-off'} size={24} color="#8C85A3" />
               </TouchableOpacity>
             </View>
             <View style={styles.gap} />
-            <Text style={styles.detailsText}>Details</Text>
+            <Text style={styles.detailsText}>{t('auth.details')}</Text>
             <View style={styles.inputContainer}>
               <TextInput
                 style={styles.input}
-                placeholder="Username"
-                placeholderTextColor="#8E8E93"
+                placeholder={t('auth.username')}
+                placeholderTextColor="#8C85A3"
                 value={username}
                 onChangeText={setUsername}
               />
@@ -144,8 +130,8 @@ export default function UserAccountAdd() {
             <View style={styles.inputContainer}>
               <TextInput
                 style={styles.input}
-                placeholder="First Name"
-                placeholderTextColor="#8E8E93"
+                placeholder={t('auth.firstName')}
+                placeholderTextColor="#8C85A3"
                 value={firstName}
                 onChangeText={setFirstName}
               />
@@ -153,15 +139,15 @@ export default function UserAccountAdd() {
             <View style={styles.inputContainer}>
               <TextInput
                 style={styles.input}
-                placeholder="Last Name"
-                placeholderTextColor="#8E8E93"
+                placeholder={t('auth.lastName')}
+                placeholderTextColor="#8C85A3"
                 value={lastName}
                 onChangeText={setLastName}
               />
             </View>
             {error ? <Text style={styles.errorText}>{error}</Text> : null}
             <TouchableOpacity style={styles.button} onPress={handleRegister}>
-              <Text style={styles.buttonText}>Register</Text>
+              <Text style={styles.buttonText}>{t('auth.register')}</Text>
             </TouchableOpacity>
           </View>
         </SafeAreaView>
@@ -194,17 +180,17 @@ const styles = StyleSheet.create({
   },
   headerBody: {
     fontSize: 18,
-    color: '#E0E0E0',
+    color: '#DDD8EA',
     textShadowColor: 'rgba(0, 0, 0, 0.75)',
     textShadowOffset: { width: -1, height: 1 },
     textShadowRadius: 2,
     marginBottom: 30,
   },
   inputContainer: {
-    backgroundColor: '#1E1E1E',
+    backgroundColor: '#1A1626',
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#333333',
+    borderColor: '#2E2742',
     marginBottom: 10,
     paddingHorizontal: 10,
     width: '95%',
@@ -222,11 +208,11 @@ const styles = StyleSheet.create({
   },
   errorText: {
     fontSize: 16,
-    color: '#FF4444',
+    color: '#F87171',
     marginBottom: 10,
   },
   button: {
-    backgroundColor: '#BB86FC',
+    backgroundColor: '#A78BFA',
     borderRadius: 8,
     padding: 12,
     alignItems: 'center',

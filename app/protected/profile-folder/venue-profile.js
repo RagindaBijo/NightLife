@@ -1,40 +1,56 @@
-import { FontAwesome } from "@expo/vector-icons";
-import AsyncStorage from "@react-native-async-storage/async-storage";
-import { createMaterialTopTabNavigator } from "@react-navigation/material-top-tabs";
+import { MaterialCommunityIcons, MaterialIcons } from "@expo/vector-icons";
+import { File } from "expo-file-system";
 import { Image } from "expo-image";
-import * as ImageManipulator from "expo-image-manipulator"; // ← NEW
+import * as ImageManipulator from "expo-image-manipulator";
 import * as ImagePicker from "expo-image-picker";
 import { LinearGradient } from "expo-linear-gradient";
 import {
-  Link,
-  useLocalSearchParams,
+  useFocusEffect,
   useNavigation,
   useRouter,
 } from "expo-router";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  ActivityIndicator,
   Alert,
   Dimensions,
-  FlatList,
-  Keyboard,
+  KeyboardAvoidingView,
+  Modal,
+  Platform,
+  Pressable,
+  RefreshControl,
   ScrollView,
   StyleSheet,
   Switch,
   Text,
   TextInput,
-  TouchableOpacity,
-  TouchableWithoutFeedback,
   View,
 } from "react-native";
+import ImageGallery from "../../../components/ImageGallery";
+import SegmentedTabs from "../../../components/SegmentedTabs";
+import { API_URL, api, getSession } from "../../../lib/api";
+import { formatEventTime } from "../../../lib/format";
+import { useI18n } from "../../../lib/i18n";
+import { takePickedLocation } from "../../../lib/locationPick";
+import { VENUE_TYPES, venueTypeLabel } from "../../../lib/venueTypes";
+import { makeStyles, useTheme } from "../../../lib/theme-context";
 
-const Tab = createMaterialTopTabNavigator();
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
+const PHOTO_GAP = 8;
+const PHOTO_SIZE = (SCREEN_WIDTH - 32 - PHOTO_GAP * 2) / 3;
+const COVER_RATIO = 16 / 10;
+
+const SECTIONS = [
+  { key: "details", labelKey: "venueProfile.details" },
+  { key: "events", labelKey: "venueProfile.events" },
+  { key: "photos", labelKey: "venueProfile.photos" },
+];
+
+const COORDINATES_RE = /^-?\d+(\.\d+)?,-?\d+(\.\d+)?$/;
+
+// ── Opening hours helpers ────────────────────────
 
 const dayOrder = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-const hours = Array.from({ length: 12 }, (_, i) =>
-  (i + 1).toString().padStart(2, "0"),
-);
-const IMAGE_DOMAIN = "https://night-life-api.elevator-rand.workers.dev/images";
 
 function groupDays(selected) {
   const sorted = [...new Set(selected)].sort(
@@ -101,351 +117,512 @@ function parseOpenHours(timeStr) {
   return { selectedDays, startHour, startPeriod, endHour, endPeriod };
 }
 
-const truncateAddress = (address) => {
-  if (!address || address.trim() === "") return "No address provided";
-  const maxLength = 45;
-  if (address.length <= maxLength) return address;
+// ── Small UI pieces ──────────────────────────────
 
-  let cutIndex = address.lastIndexOf(" ", maxLength);
-  if (cutIndex === -1 || cutIndex < maxLength / 2) {
-    cutIndex = maxLength;
-  }
+function Card({ icon, title, action, children }) {
+  const { colors: COLORS } = useTheme();
+  const styles = useStyles();
+  return (
+    <View style={styles.card}>
+      <View style={styles.cardHeader}>
+        <View style={styles.cardIcon}>
+          <MaterialIcons name={icon} size={18} color={COLORS.accent} />
+        </View>
+        <Text style={styles.cardTitle}>{title}</Text>
+        {action}
+      </View>
+      {children}
+    </View>
+  );
+}
 
-  return address.slice(0, cutIndex).trim() + "...";
-};
+function SmallButton({ label, icon, onPress, primary, disabled }) {
+  const { colors: COLORS } = useTheme();
+  const styles = useStyles();
+  return (
+    <Pressable
+      onPress={onPress}
+      disabled={disabled}
+      hitSlop={6}
+      style={({ pressed }) => [
+        styles.smallButton,
+        primary && styles.smallButtonPrimary,
+        (pressed || disabled) && styles.pressed,
+      ]}
+      accessibilityRole="button"
+    >
+      {icon && (
+        <MaterialIcons
+          name={icon}
+          size={16}
+          color={primary ? COLORS.onAccent : COLORS.accent}
+        />
+      )}
+      <Text style={[styles.smallButtonText, primary && styles.smallButtonTextPrimary]}>
+        {label}
+      </Text>
+    </Pressable>
+  );
+}
+
+/** Card with a text value that switches to an input with Cancel / Save. */
+function EditableCard({ icon, title, value, placeholder, multiline, onSave, onStartEdit }) {
+  const { colors: COLORS } = useTheme();
+  const { t } = useI18n();
+  const styles = useStyles();
+  const cardRef = useRef(null);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const startEditing = () => {
+    setDraft(value || "");
+    setEditing(true);
+    onStartEdit?.(cardRef);
+  };
+
+  const save = async () => {
+    setSaving(true);
+    const ok = await onSave(draft.trim());
+    setSaving(false);
+    if (ok) setEditing(false);
+  };
+
+  return (
+    <View ref={cardRef} collapsable={false}>
+    <Card
+      icon={icon}
+      title={title}
+      action={!editing && <SmallButton label={t("venueProfile.edit")} icon="edit" onPress={startEditing} />}
+    >
+      {editing ? (
+        <>
+          <TextInput
+            style={[styles.input, multiline && styles.inputMultiline]}
+            value={draft}
+            onChangeText={setDraft}
+            placeholder={placeholder}
+            placeholderTextColor={COLORS.placeholder}
+            selectionColor={COLORS.accent}
+            multiline={multiline}
+            autoFocus
+          />
+          <View style={styles.editActions}>
+            <SmallButton label={t("common.cancel")} onPress={() => setEditing(false)} disabled={saving} />
+            {saving ? (
+              <ActivityIndicator color={COLORS.accent} style={styles.savingSpinner} />
+            ) : (
+              <SmallButton label={t("common.save")} icon="check" primary onPress={save} />
+            )}
+          </View>
+        </>
+      ) : value ? (
+        <Text style={styles.cardText}>{value}</Text>
+      ) : (
+        <Pressable onPress={startEditing}>
+          <Text style={styles.cardPlaceholder}>{placeholder}</Text>
+        </Pressable>
+      )}
+    </Card>
+    </View>
+  );
+}
+
+function VenueTypesCard({ selected, onChange }) {
+  const { colors: COLORS } = useTheme();
+  const { t } = useI18n();
+  const styles = useStyles();
+  const [saving, setSaving] = useState(false);
+
+  const toggleType = async (key) => {
+    const next = selected.includes(key)
+      ? selected.filter((type) => type !== key)
+      : [...selected, key];
+    setSaving(true);
+    await onChange(next);
+    setSaving(false);
+  };
+
+  return (
+    <Card
+      icon="local-bar"
+      title={t("venueProfile.venueType")}
+      action={saving && <ActivityIndicator size="small" color={COLORS.accent} />}
+    >
+      <Text style={styles.cardHint}>
+        {t("venueProfile.venueTypeHint")}
+      </Text>
+      <View style={styles.chipWrap}>
+        {VENUE_TYPES.map((type) => {
+          const active = selected.includes(type.key);
+          return (
+            <Pressable
+              key={type.key}
+              onPress={() => toggleType(type.key)}
+              disabled={saving}
+              style={[styles.chip, active && styles.chipActive]}
+              accessibilityRole="checkbox"
+              accessibilityState={{ checked: active }}
+            >
+              <MaterialCommunityIcons
+                name={type.icon}
+                size={15}
+                color={active ? COLORS.onAccent : COLORS.accent}
+              />
+              <Text style={[styles.chipText, active && styles.chipTextActive]}>
+                {venueTypeLabel(type.key)}
+              </Text>
+            </Pressable>
+          );
+        })}
+      </View>
+    </Card>
+  );
+}
+
+function HourStepper({ label, hour, period, onChange }) {
+  const { colors: COLORS } = useTheme();
+  const { t } = useI18n();
+  const styles = useStyles();
+  const step = (delta) => onChange(((hour - 1 + delta + 12) % 12) + 1, period);
+
+  return (
+    <View style={styles.stepperRow}>
+      <Text style={styles.stepperLabel}>{label}</Text>
+      <View style={styles.stepper}>
+        <Pressable onPress={() => step(-1)} hitSlop={8} style={styles.stepperButton} accessibilityLabel={t("venueProfile.earlier", { label })}>
+          <MaterialIcons name="remove" size={20} color={COLORS.text} />
+        </Pressable>
+        <Text style={styles.stepperValue}>{hour}</Text>
+        <Pressable onPress={() => step(1)} hitSlop={8} style={styles.stepperButton} accessibilityLabel={t("venueProfile.later", { label })}>
+          <MaterialIcons name="add" size={20} color={COLORS.text} />
+        </Pressable>
+      </View>
+      <View style={styles.periodToggle}>
+        {["AM", "PM"].map((value) => (
+          <Pressable
+            key={value}
+            onPress={() => onChange(hour, value)}
+            style={[styles.periodOption, period === value && styles.periodOptionActive]}
+          >
+            <Text style={[styles.periodText, period === value && styles.periodTextActive]}>
+              {value}
+            </Text>
+          </Pressable>
+        ))}
+      </View>
+    </View>
+  );
+}
+
+/** Bottom sheet for editing opening hours. Mounted only while open. */
+function HoursSheet({ value, onClose, onSave }) {
+  const { colors: COLORS } = useTheme();
+  const { t } = useI18n();
+  const styles = useStyles();
+  const initial = parseOpenHours(value);
+  const [days, setDays] = useState(initial.selectedDays);
+  const [start, setStart] = useState({
+    hour: Number(initial.startHour) || 10,
+    period: initial.startPeriod,
+  });
+  const [end, setEnd] = useState({
+    hour: Number(initial.endHour) || 10,
+    period: initial.endPeriod,
+  });
+  const [saving, setSaving] = useState(false);
+
+  const toggleDay = (day) =>
+    setDays((prev) => (prev.includes(day) ? prev.filter((d) => d !== day) : [...prev, day]));
+
+  const preview = days.length
+    ? `${groupDays(days)}: ${start.hour}${start.period}-${end.hour}${end.period}`
+    : t("venueProfile.pickOneDay");
+
+  const save = async () => {
+    setSaving(true);
+    const ok = await onSave(preview);
+    setSaving(false);
+    if (ok) onClose();
+  };
+
+  return (
+    <Modal visible transparent animationType="slide" onRequestClose={onClose}>
+      <View style={styles.sheetBackdrop}>
+        <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
+        <View style={styles.sheet}>
+          <View style={styles.sheetHandle} />
+          <Text style={styles.sheetTitle}>{t("venueProfile.openingHours")}</Text>
+
+          <Text style={styles.sheetLabel}>{t("venueProfile.openOn")}</Text>
+          <View style={styles.dayRow}>
+            {dayOrder.map((day) => {
+              const active = days.includes(day);
+              return (
+                <Pressable
+                  key={day}
+                  onPress={() => toggleDay(day)}
+                  style={[styles.dayChip, active && styles.dayChipActive]}
+                  accessibilityRole="checkbox"
+                  accessibilityState={{ checked: active }}
+                >
+                  <Text style={[styles.dayChipText, active && styles.dayChipTextActive]}>
+                    {t("days.short")[dayOrder.indexOf(day)]}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+          <View style={styles.presetRow}>
+            <SmallButton label={t("venueProfile.everyDay")} onPress={() => setDays(dayOrder)} />
+            <SmallButton label={t("venueProfile.weekends")} onPress={() => setDays(["Fri", "Sat", "Sun"])} />
+          </View>
+
+          <Text style={styles.sheetLabel}>{t("venueProfile.hours")}</Text>
+          <HourStepper
+            label={t("venueProfile.opens")}
+            hour={start.hour}
+            period={start.period}
+            onChange={(hour, period) => setStart({ hour, period })}
+          />
+          <HourStepper
+            label={t("venueProfile.closes")}
+            hour={end.hour}
+            period={end.period}
+            onChange={(hour, period) => setEnd({ hour, period })}
+          />
+
+          <View style={styles.hoursPreview}>
+            <MaterialIcons name="schedule" size={18} color={COLORS.accent} />
+            <Text style={styles.hoursPreviewText}>{preview}</Text>
+          </View>
+
+          <Pressable
+            onPress={save}
+            disabled={saving || days.length === 0}
+            style={({ pressed }) => [
+              styles.sheetSave,
+              (saving || days.length === 0) && styles.sheetSaveDisabled,
+              pressed && styles.pressed,
+            ]}
+          >
+            {saving ? (
+              <ActivityIndicator color={COLORS.onAccent} />
+            ) : (
+              <Text style={styles.sheetSaveText}>{t("venueProfile.saveHours")}</Text>
+            )}
+          </Pressable>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+// ── Screen ───────────────────────────────────────
 
 export default function VenueProfile() {
+  const { colors: COLORS } = useTheme();
+  const { t } = useI18n();
+  const styles = useStyles();
   const navigation = useNavigation();
   const router = useRouter();
-  const { selectedLatLong, selectedAddress } = useLocalSearchParams();
-  const [venue, setVenue] = useState({
-    id: "1",
-    title: "Venue Profile",
-    address: "123 Main St, City",
-    lat_long: "0,0",
-    openHours: "Mon-Sun: 10AM-10PM",
-    image: "https://picsum.photos/800/600?random=1",
-    status: "Status Content for Venue Profile",
-    about: "About Content for Venue Profile",
-    event_ids: null,
-    photo_ids: null,
-    public_status: 0,
-  });
-  const [isEditing, setIsEditing] = useState(false);
-  const [selectedDays, setSelectedDays] = useState([]);
-  const [startHour, setStartHour] = useState("10");
-  const [startPeriod, setStartPeriod] = useState("AM");
-  const [endHour, setEndHour] = useState("10");
-  const [endPeriod, setEndPeriod] = useState("PM");
-  const [showDaysModal, setShowDaysModal] = useState(false);
-  const [showStartTimeModal, setShowStartTimeModal] = useState(false);
-  const [showEndTimeModal, setShowEndTimeModal] = useState(false);
-  const [isSwitchOn, setIsSwitchOn] = useState(false);
+  const scrollRef = useRef(null);
+  const contentRef = useRef(null);
+  const [venue, setVenue] = useState(null);
+  const [loadError, setLoadError] = useState(null);
+  const [events, setEvents] = useState(null);
+  const [section, setSection] = useState("details");
   const [refreshing, setRefreshing] = useState(false);
-  const [showFullAddressModal, setShowFullAddressModal] = useState(false);
-
-  const [images, setImages] = useState([]);
-  const [newImages, setNewImages] = useState([]);
-
-  const apiUrl = "https://night-life-api.elevator-rand.workers.dev";
-
-  const fetchVenue = async () => {
-    try {
-      const token = await AsyncStorage.getItem("token");
-      const userId = await AsyncStorage.getItem("userId");
-      if (!token || !userId) {
-        console.error("No token or userId found");
-        return;
-      }
-
-      const response = await fetch(`${apiUrl}/api/venue/${userId}`, {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        const firstPhoto = data.photo_ids
-          ? `${IMAGE_DOMAIN}/${data.photo_ids
-              .split(",")
-              .filter((id) => id.trim())[0]
-              ?.trim()}`
-          : "https://picsum.photos/800/600?random=1";
-        setVenue({
-          id: data.id.toString(),
-          title: data.title || "Venue Profile",
-          address: data.address || "Add Address",
-          lat_long: data.lat_long || "0,0",
-          openHours: data.open_hours || "Mon-Sun: 10AM-10PM",
-          image: firstPhoto,
-          status: data.status || "Status Content for Venue Profile",
-          about: data.about || "About Content for Venue Profile",
-          event_ids: data.event_ids,
-          photo_ids: data.photo_ids,
-          public_status: data.public_status || 0,
-        });
-        setIsSwitchOn(!!data.public_status);
-      } else {
-        console.error("Failed to fetch venue profile");
-      }
-    } catch (error) {
-      console.error("Error fetching venue profile:", error);
-    }
-  };
-
-  const geocodeAddress = async (address) => {
-    try {
-      const response = await fetch(
-        `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(address)}`,
-      );
-      const data = await response.json();
-      if (data && data.length > 0) {
-        const { lat, lon } = data[0];
-        return `${lat},${lon}`;
-      }
-      return null;
-    } catch (error) {
-      console.error("Geocoding error:", error);
-      return null;
-    }
-  };
-
-  const handleAddressChange = async (address) => {
-    setVenue((prev) => ({ ...prev, address }));
-    if (address.trim()) {
-      const coords = await geocodeAddress(address.trim());
-      if (coords) {
-        setVenue((prev) => ({ ...prev, lat_long: coords }));
-      } else {
-        Alert.alert(
-          "Geocoding Failed",
-          'Could not fetch coordinates. Try "Locate On Map".',
-        );
-      }
-    }
-  };
-
-  const updateVenueInDatabase = async (updates) => {
-    try {
-      const token = await AsyncStorage.getItem("token");
-      const userId = await AsyncStorage.getItem("userId");
-      if (!token || !userId) {
-        Alert.alert("Error", "No token or userId found");
-        return false;
-      }
-
-      const response = await fetch(`${apiUrl}/api/venue/${userId}`, {
-        method: "PUT",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(updates),
-      });
-
-      if (response.ok) {
-        setVenue((prev) => ({ ...prev, ...updates }));
-        return true;
-      } else {
-        console.error("Update venue failed:", await response.text());
-        Alert.alert("Error", "Failed to update venue details.");
-        return false;
-      }
-    } catch (error) {
-      console.error("Update venue error:", error);
-      Alert.alert("Error", "Network or server issue.");
-      return false;
-    }
-  };
+  const [hoursOpen, setHoursOpen] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [gallery, setGallery] = useState({ visible: false, index: 0 });
+  const [visibilitySaving, setVisibilitySaving] = useState(false);
 
   useEffect(() => {
     navigation.setOptions({ headerShown: false });
   }, [navigation]);
 
+  // ── Data ──
+
+  const fetchVenue = useCallback(
+    () =>
+      getSession()
+        .then((session) => {
+          if (!session) throw new Error("No session");
+          return api(`/api/venue/${session.userId}`);
+        })
+        .then((data) => {
+          setVenue({
+            id: String(data.id),
+            title: data.title || "",
+            address: data.address || "",
+            lat_long: data.lat_long || "",
+            open_hours: data.open_hours || "",
+            status: data.status || "",
+            about: data.about || "",
+            photo_ids: data.photo_ids ?? [], // full URLs
+            types: data.types ?? [],
+            public_status: data.public_status || 0,
+          });
+          setLoadError(null);
+        })
+        .catch((err) => {
+          console.error("Error fetching venue profile:", err.message);
+          setLoadError(
+            err.status === 0
+              ? t("common.cantConnect")
+              : t("venueProfile.loadError"),
+          );
+        }),
+    [t],
+  );
+
+  const fetchEvents = useCallback(
+    (venueId) =>
+      api(`/api/events?venue_id=${venueId}`).then(
+        (data) =>
+          setEvents(
+            data.map((event, index) => ({
+              id: String(event.id),
+              title: event.title || t("event.numbered", { number: index + 1 }),
+              time: event.time || "",
+              image: event.photo_id || null,
+            })),
+          ),
+        (err) => {
+          console.error("Error fetching events:", err.message);
+          setEvents((prev) => prev ?? []);
+        },
+      ),
+    [t],
+  );
+
+  // Reload when coming back (e.g. after creating or editing an event)
+  useFocusEffect(
+    useCallback(() => {
+      fetchVenue();
+    }, [fetchVenue]),
+  );
+
   useEffect(() => {
-    fetchVenue();
+    if (venue?.id) fetchEvents(venue.id);
+  }, [venue?.id, fetchEvents]);
+
+  const onRefresh = async () => {
+    setRefreshing(true);
+    await fetchVenue();
+    if (venue?.id) await fetchEvents(venue.id);
+    setRefreshing(false);
+  };
+
+  /** Saves fields to the API and, on success, into state. Returns true/false. */
+  const updateVenue = useCallback(
+    (updates) =>
+      getSession()
+        .then((session) =>
+          api(`/api/venue/${session.userId}`, { method: "PUT", body: updates }),
+        )
+        .then(() => {
+          setVenue((prev) => ({ ...prev, ...updates }));
+          return true;
+        })
+        .catch((err) => {
+          console.error("Update venue error:", err.message);
+          Alert.alert(
+            t("common.saveError"),
+            err.status === 0 ? t("common.networkIssue") : err.message || t("common.pleaseTryAgain"),
+          );
+          return false;
+        }),
+    [t],
+  );
+
+  // A location picked on the map screen is handed back when we regain focus
+  useFocusEffect(
+    useCallback(() => {
+      const picked = takePickedLocation();
+      if (picked) updateVenue({ lat_long: picked.latLong, address: picked.address });
+    }, [updateVenue]),
+  );
+
+  // Scroll a card that's being edited to the top, so the keyboard doesn't cover it
+  const scrollToCard = useCallback((cardRef) => {
+    setTimeout(() => {
+      if (!cardRef.current || !contentRef.current) return;
+      cardRef.current.measureLayout(contentRef.current, (_x, y) =>
+        scrollRef.current?.scrollTo({ y: Math.max(0, y - 12), animated: true }),
+      );
+    }, 350);
   }, []);
 
-  useEffect(() => {
-    if (selectedLatLong && selectedAddress) {
-      const decodedAddress = decodeURIComponent(selectedAddress);
-      const isValidLatLong = /^-?\d+\.\d+,-?\d+\.\d+$/.test(selectedLatLong);
-      if (isValidLatLong) {
-        setVenue((prev) => ({
-          ...prev,
-          lat_long: selectedLatLong,
-          address: decodedAddress,
-        }));
-        updateVenueInDatabase({
-          lat_long: selectedLatLong,
-          address: decodedAddress,
-        });
-      } else {
-        Alert.alert("Error", "Invalid coordinates. Try again.");
-      }
-    }
-  }, [selectedLatLong, selectedAddress]);
-
-  useEffect(() => {
-    const parsed = parseOpenHours(venue.openHours);
-    setSelectedDays(parsed.selectedDays);
-    setStartHour(parsed.startHour);
-    setStartPeriod(parsed.startPeriod);
-    setEndHour(parsed.endHour);
-    setEndPeriod(parsed.endPeriod);
-  }, [venue.openHours]);
-
-  const toggleDay = (day) => {
-    setSelectedDays((prev) =>
-      prev.includes(day) ? prev.filter((d) => d !== day) : [...prev, day],
+  const confirmDeletePhoto = (url) =>
+    Alert.alert(
+      t("venueProfile.deletePhotoTitle"),
+      url === venue.photo_ids[0]
+        ? t("venueProfile.deleteCoverMessage")
+        : t("venueProfile.deletePhotoMessage"),
+      [
+        { text: t("common.cancel"), style: "cancel" },
+        {
+          text: t("common.delete"),
+          style: "destructive",
+          onPress: async () => {
+            // Remove it from the venue first, then delete the file itself
+            const ok = await updateVenue({
+              photo_ids: venue.photo_ids.filter((photo) => photo !== url),
+            });
+            if (ok) {
+              const key = url.replace(`${API_URL}/images/`, "");
+              api(`/api/delete-image/${key}`, { method: "DELETE" }).catch((err) =>
+                console.warn("Delete photo file failed:", err.message),
+              );
+            }
+          },
+        },
+      ],
     );
-  };
 
-  const updateOpenHours = () => {
-    const grouped = groupDays(selectedDays);
-    if (!grouped) return;
-    const newOpenHours = `${grouped}: ${startHour}${startPeriod}-${endHour}${endPeriod}`;
-    setVenue({ ...venue, openHours: newOpenHours });
-  };
+  // ── Actions ──
 
-  const handleEditToggle = async () => {
-    if (isEditing) {
-      const groupedDays = groupDays(selectedDays);
-      const newOpenHours = groupedDays
-        ? `${groupedDays}: ${startHour}${startPeriod}-${endHour}${endPeriod}`
-        : venue.openHours;
-      const updates = {
-        title: venue.title.trim(),
-        address: venue.address.trim(),
-        lat_long: venue.lat_long,
-        open_hours: newOpenHours.trim(),
-      };
-      const success = await updateVenueInDatabase(updates);
-      if (success) {
-        setVenue((prev) => ({
-          ...prev,
-          title: updates.title,
-          address: updates.address,
-          lat_long: updates.lat_long,
-          openHours: updates.open_hours,
-        }));
-      }
-    }
-    setIsEditing(!isEditing);
-  };
-
-  const validateFields = () => {
-    const defaultValues = {
-      title: "Venue Profile",
-      address: "123 Main St, City",
-      lat_long: "0,0",
-      openHours: "Mon-Sun: 10AM-10PM",
-      status: "Status Content for Venue Profile",
-      about: "About Content for Venue Profile",
-    };
-
-    const errors = [];
-
-    if (
-      !venue.title ||
-      venue.title.trim() === "" ||
-      venue.title === defaultValues.title
-    )
-      errors.push("Name");
-    if (
-      !venue.address ||
-      venue.address.trim() === "" ||
-      venue.address === defaultValues.address
-    )
-      errors.push("Address");
-    if (!venue.lat_long || !/^-?\d+\.\d+,-?\d+\.\d+$/.test(venue.lat_long))
-      errors.push("Coordinates");
-    if (
-      !venue.openHours ||
-      venue.openHours.trim() === "" ||
-      venue.openHours === defaultValues.openHours
-    )
-      errors.push("Open Hours");
-    if (
-      !venue.status ||
-      venue.status.trim() === "" ||
-      venue.status === defaultValues.status
-    )
-      errors.push("Status");
-    if (
-      !venue.about ||
-      venue.about.trim() === "" ||
-      venue.about === defaultValues.about
-    )
-      errors.push("About");
-
-    return { isValid: errors.length === 0, errors };
-  };
-
-  const handleSwitchToggle = async () => {
-    if (!isSwitchOn) {
-      const { isValid, errors } = validateFields();
-      if (!isValid) {
-        Alert.alert(
-          "Incomplete Profile",
-          `Please fill: ${errors.join(", ")}.`,
-          [{ text: "OK" }],
-        );
-        return;
-      }
-    }
-
-    const newStatus = !isSwitchOn ? 1 : 0;
-    const success = await updateVenueInDatabase({ public_status: newStatus });
-    if (success) setIsSwitchOn(newStatus);
-  };
-
-  const handleLocateOnMap = () => {
+  const openMapPicker = () => {
     router.push({
       pathname: "/protected/profile-folder/maps",
-      params: { selectLocation: "true", currentLatLong: venue.lat_long },
+      params: { currentLatLong: venue.lat_long || "" },
     });
   };
 
-  const onRefresh = useCallback(() => {
-    setRefreshing(true);
-    fetchVenue().finally(() => setRefreshing(false));
-  }, []);
+  const checklist = venue
+    ? [
+        { label: t("venueProfile.venueName"), done: !!venue.title.trim() },
+        {
+          label: t("venueProfile.locationOnMap"),
+          done: !!venue.address.trim() && COORDINATES_RE.test(venue.lat_long),
+        },
+        { label: t("venueProfile.openingHours"), done: !!venue.open_hours.trim() },
+        { label: t("venueProfile.tonightStatus"), done: !!venue.status.trim() },
+        { label: t("venueProfile.about"), done: !!venue.about.trim() },
+      ]
+    : [];
+  const missing = checklist.filter((item) => !item.done);
 
-  function EditSaveIcon() {
-    return (
-      <>
-        <Switch
-          style={styles.switchContainer}
-          trackColor={{ false: "#8E8E93", true: "#00FF00" }}
-          thumbColor={isSwitchOn ? "#FFFFFF" : "#FFFFFF"}
-          onValueChange={handleSwitchToggle}
-          value={isSwitchOn}
-        />
-        <TouchableOpacity
-          onPress={handleEditToggle}
-          style={styles.iconContainer}
-        >
-          <FontAwesome
-            name={isEditing ? "save" : "pencil"}
-            size={24}
-            color={isEditing ? "#FFD700" : "#FFFFFF"}
-          />
-        </TouchableOpacity>
-      </>
-    );
-  }
+  const toggleVisibility = async (makePublic) => {
+    if (makePublic && missing.length > 0) {
+      Alert.alert(
+        t("venueProfile.almostThere"),
+        t("venueProfile.beforePublic", { items: missing.map((item) => item.label).join(", ") }),
+      );
+      return;
+    }
+    setVisibilitySaving(true);
+    await updateVenue({ public_status: makePublic ? 1 : 0 });
+    setVisibilitySaving(false);
+  };
 
-  // ================== FIXED IMAGE UPLOAD WITH CROPPING ==================
-  const handleNewImage = async () => {
+  const addPhoto = async () => {
     try {
-      const { status } =
-        await ImagePicker.requestMediaLibraryPermissionsAsync();
+      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
       if (status !== "granted") {
-        Alert.alert("Permission Denied", "Need media library access.");
+        Alert.alert(t("common.permissionDenied"), t("common.photosPermission"));
         return;
       }
 
@@ -454,872 +631,972 @@ export default function VenueProfile() {
         allowsEditing: false,
         quality: 1,
       });
-
       if (result.canceled || !result.assets?.[0]) return;
 
+      setUploading(true);
+
+      // Centre-crop to the 16:10 cover shape and keep a sensible size
       const { uri, width: origW, height: origH } = result.assets[0];
-      const targetW = SCREEN_WIDTH;
-      const targetH = 200;
-
-      const cropY = Math.max(0, (origH - targetH) / 2);
-      const cropW = Math.min(origW, targetW);
-      const cropX = (origW - cropW) / 2;
-
+      let cropW = origW;
+      let cropH = origW / COVER_RATIO;
+      if (cropH > origH) {
+        cropH = origH;
+        cropW = origH * COVER_RATIO;
+      }
       const manipResult = await ImageManipulator.manipulateAsync(
         uri,
         [
           {
             crop: {
-              originX: cropX,
-              originY: cropY,
-              width: cropW,
-              height: targetH,
+              originX: Math.round((origW - cropW) / 2),
+              originY: Math.round((origH - cropH) / 2),
+              width: Math.round(cropW),
+              height: Math.round(cropH),
             },
           },
-          { resize: { width: targetW } },
+          { resize: { width: Math.min(1600, Math.round(cropW)) } },
         ],
         { compress: 0.8, format: ImageManipulator.SaveFormat.JPEG },
       );
 
-      const token = await AsyncStorage.getItem("token");
-      if (!token) {
-        Alert.alert("Error", "No token found.");
-        return;
-      }
-
       const formData = new FormData();
-      const ext = manipResult.uri.split(".").pop().toLowerCase() || "jpg";
-      formData.append("file", {
-        uri: manipResult.uri,
-        name: `venue-${Date.now()}.${ext}`,
-        type: `image/${ext}`,
-      });
+      formData.append("file", new File(manipResult.uri));
 
-      const response = await fetch(`${apiUrl}/api/upload-image?type=venue`, {
+      const { urls } = await api("/api/upload-image?type=venue", {
         method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
         body: formData,
       });
 
-      if (response.ok) {
-        const { keys } = await response.json();
-        const newImageUris = keys.map((key) => ({
-          id: key,
-          uri: `${IMAGE_DOMAIN}/${key}`,
-        }));
-
-        // ← NOW USING PARENT STATE
-        setNewImages((prev) => [...prev, ...newImageUris]);
-        setImages((prev) => [...prev, ...newImageUris]);
-
-        const newPhotoIdsStr = keys.join(",");
-        const updatedPhotoIds = venue.photo_ids
-          ? `${venue.photo_ids},${newPhotoIdsStr}`
-          : newPhotoIdsStr;
-        await updateVenueInDatabase({ photo_ids: updatedPhotoIds });
-
-        Alert.alert("Success", "Image uploaded!");
-      } else {
-        const err = await response.json();
-        Alert.alert("Upload Failed", err.error || "Try again.");
-      }
-    } catch (error) {
-      console.error("Image upload error:", error);
-      Alert.alert("Error", "Failed to process image.");
+      // The API accepts full URLs, so photo_ids stays a list of URLs in state
+      await updateVenue({ photo_ids: [...venue.photo_ids, ...urls] });
+    } catch (err) {
+      console.error("Image upload error:", err.message);
+      Alert.alert(
+        t("common.uploadFailed"),
+        err.status === 0 ? t("common.networkIssue") : err.message || t("common.pleaseTryAgain"),
+      );
+    } finally {
+      setUploading(false);
     }
   };
-  // ========================================================================
 
-  const StatusScreen = ({ initialStatus }) => {
-    const [isEditingStatus, setIsEditingStatus] = useState(false);
-    const [statusText, setStatusText] = useState(initialStatus);
-
-    const handleEditStatus = () => setIsEditingStatus(true);
-
-    const handleSaveStatus = async () => {
-      setIsEditingStatus(false);
-      const success = await updateVenueInDatabase({
-        status: statusText.trim(),
-      });
-      if (success) setVenue((prev) => ({ ...prev, status: statusText.trim() }));
-    };
-
-    return (
-      <View
-        style={[styles.tabContent, { flex: 1, backgroundColor: "#121212" }]}
-      >
-        {!isEditingStatus && (
-          <TouchableOpacity
-            style={styles.editButton}
-            onPress={handleEditStatus}
-          >
-            <Text style={styles.editButtonText}>Edit Status</Text>
-          </TouchableOpacity>
-        )}
-        <View style={styles.tabTextContainer}>
-          {isEditingStatus ? (
-            <>
-              <ScrollView style={styles.inputScroll}>
-                <TextInput
-                  style={styles.statusInput}
-                  value={statusText}
-                  onChangeText={setStatusText}
-                  multiline
-                />
-              </ScrollView>
-              <TouchableOpacity
-                style={styles.saveButton}
-                onPress={handleSaveStatus}
-              >
-                <Text style={styles.saveButtonText}>Save</Text>
-              </TouchableOpacity>
-            </>
-          ) : (
-            <Text style={styles.tabContentText}>{statusText}</Text>
-          )}
-        </View>
-      </View>
-    );
-  };
-
-  const EventsScreen = ({ initialEventIds, refreshTrigger }) => {
-    const [events, setEvents] = useState([]);
-
-    const fetchEvents = async () => {
-      try {
-        const token = await AsyncStorage.getItem("token");
-        const userId = await AsyncStorage.getItem("userId");
-        if (!token || !userId) return;
-
-        if (!initialEventIds) {
-          setEvents([]);
-          return;
-        }
-
-        const ids = [
-          ...new Set(
-            initialEventIds
-              .split(",")
-              .map((id) => id.trim())
-              .filter((id) => id),
-          ),
-        ];
-        if (ids.length === 0) {
-          setEvents([]);
-          return;
-        }
-
-        const promises = ids.map(async (id) => {
-          const res = await fetch(`${apiUrl}/api/events/${id}`, {
-            headers: { Authorization: `Bearer ${token}` },
-          });
-          return res.ok ? await res.json() : null;
-        });
-
-        const results = await Promise.all(promises);
-        setEvents(
-          results
-            .filter((e) => e !== null)
-            .map((e, i) => ({
-              id: e.id.toString(),
-              title: e.title || `Event ${i + 1}`,
-              venueName: venue.title || "Unknown",
-              time: e.time || "No time",
-              image:
-                e.photo_id || `https://picsum.photos/200/200?random=${i + 1}`,
-            })),
-        );
-      } catch (err) {
-        console.error(err);
-        setEvents([]);
-      }
-    };
-
-    useEffect(() => {
-      fetchEvents();
-    }, [initialEventIds, venue.title, refreshTrigger]);
-
-    const handleDeletePress = (eventId, e) => {
-      e.stopPropagation();
-      Alert.alert("Delete?", "Remove this event?", [
-        { text: "No" },
-        {
-          text: "Yes",
-          style: "destructive",
-          onPress: () => handleConfirmDelete(eventId),
+  const deleteEvent = (event) => {
+    Alert.alert(t("venueProfile.deleteEventTitle"), t("venueProfile.deleteEventMessage", { name: event.title }), [
+      { text: t("common.cancel"), style: "cancel" },
+      {
+        text: t("common.delete"),
+        style: "destructive",
+        onPress: async () => {
+          try {
+            await api(`/api/events/${event.id}`, { method: "DELETE" });
+            setEvents((prev) => prev.filter((e) => e.id !== event.id));
+          } catch (err) {
+            console.error("Delete event error:", err.message);
+            Alert.alert(t("common.deleteError"), t("common.pleaseTryAgain"));
+          }
         },
-      ]);
-    };
+      },
+    ]);
+  };
 
-    const handleConfirmDelete = async (eventId) => {
-      try {
-        const token = await AsyncStorage.getItem("token");
-        const res = await fetch(`${apiUrl}/api/events/${eventId}`, {
-          method: "DELETE",
-          headers: { Authorization: `Bearer ${token}` },
-        });
+  // ── Full-screen states ──
 
-        if (res.ok) {
-          setEvents((prev) => prev.filter((e) => e.id !== eventId));
-          setVenue((prev) => ({
-            ...prev,
-            event_ids: [
-              ...new Set(
-                prev.event_ids
-                  ? prev.event_ids
-                      .split(",")
-                      .filter((id) => id.trim() !== eventId)
-                  : [],
-              ),
-            ].join(","),
-          }));
-          Alert.alert("Success", "Event deleted.");
-        }
-      } catch (err) {
-        Alert.alert("Error", "Failed to delete.");
-      }
-    };
-
+  if (!venue) {
     return (
-      <View
-        style={[styles.eventContainer, { flex: 1, backgroundColor: "#121212" }]}
-      >
-        <Link href="/protected/profile-folder/create-event" asChild>
-          <TouchableOpacity style={styles.newEventButton}>
-            <Text style={styles.newEventButtonText}>New Event</Text>
-          </TouchableOpacity>
-        </Link>
-        {events.length === 0 ? (
-          <Text style={styles.noEventsText}>No Events</Text>
+      <View style={styles.centered}>
+        {loadError ? (
+          <>
+            <MaterialIcons name="cloud-off" size={48} color={COLORS.textSecondary} />
+            <Text style={styles.messageText}>{loadError}</Text>
+            <Pressable
+              onPress={fetchVenue}
+              style={({ pressed }) => [styles.retryButton, pressed && styles.pressed]}
+            >
+              <Text style={styles.retryButtonText}>{t("common.tryAgain")}</Text>
+            </Pressable>
+          </>
         ) : (
-          <ScrollView style={styles.eventListContainer}>
-            {events.map((event) => (
-              <Link
-                key={event.id}
-                href={`/protected/profile-folder/create-event?eventId=${event.id}`}
-                asChild
-              >
-                <TouchableOpacity style={styles.eventPost}>
-                  <Image
-                    source={{ uri: event.image }}
-                    style={styles.eventImage}
-                    contentFit="cover"
-                  />
-                  <View style={styles.eventTextContainer}>
-                    <Text style={styles.eventTitle}>{event.title}</Text>
-                    <Text style={styles.eventBody}>{event.venueName}</Text>
-                    <Text style={styles.eventTime}>{event.time}</Text>
-                  </View>
-                  <View style={styles.eventIconsContainer}>
-                    <TouchableOpacity
-                      style={styles.iconButton}
-                      onPress={(e) => handleDeletePress(event.id, e)}
-                    >
-                      <FontAwesome name="trash" size={28} color="#FF0000" />
-                    </TouchableOpacity>
-                  </View>
-                </TouchableOpacity>
-              </Link>
-            ))}
-          </ScrollView>
+          <ActivityIndicator size="large" color={COLORS.accent} />
         )}
       </View>
     );
-  };
+  }
 
-  const AboutScreen = ({ initialAbout }) => {
-    const [isEditingAbout, setIsEditingAbout] = useState(false);
-    const [aboutText, setAboutText] = useState(initialAbout);
+  const isPublic = !!venue.public_status;
+  const cover = venue.photo_ids[0];
 
-    const handleEditAbout = () => setIsEditingAbout(true);
-    const handleSaveAbout = async () => {
-      setIsEditingAbout(false);
-      const success = await updateVenueInDatabase({ about: aboutText.trim() });
-      if (success) setVenue((prev) => ({ ...prev, about: aboutText.trim() }));
-    };
+  // ── Sections ──
 
-    return (
-      <View
-        style={[styles.tabContent, { flex: 1, backgroundColor: "#121212" }]}
-      >
-        {!isEditingAbout && (
-          <TouchableOpacity style={styles.editButton} onPress={handleEditAbout}>
-            <Text style={styles.editButtonText}>Edit About</Text>
-          </TouchableOpacity>
-        )}
-        <View style={styles.tabTextContainer}>
-          {isEditingAbout ? (
-            <>
-              <ScrollView style={styles.inputScroll}>
-                <TextInput
-                  style={styles.statusInput}
-                  value={aboutText}
-                  onChangeText={setAboutText}
-                  multiline
-                />
-              </ScrollView>
-              <TouchableOpacity
-                style={styles.saveButton}
-                onPress={handleSaveAbout}
-              >
-                <Text style={styles.saveButtonText}>Save</Text>
-              </TouchableOpacity>
-            </>
-          ) : (
-            <Text style={styles.tabContentText}>{aboutText}</Text>
-          )}
-        </View>
-      </View>
-    );
-  };
-
-  const ImagesScreen = ({ initialPhotoIds, refreshTrigger }) => {
-    const [images, setImages] = useState([]);
-    const [newImages, setNewImages] = useState([]);
-
-    const fetchImages = async () => {
-      if (!initialPhotoIds) {
-        setImages([]);
-        return;
-      }
-      const ids = [
-        ...new Set(
-          initialPhotoIds
-            .split(",")
-            .map((id) => id.trim())
-            .filter((id) => id),
-        ),
-      ];
-      setImages(ids.map((id) => ({ id, uri: `${IMAGE_DOMAIN}/${id}` })));
-    };
-
-    useEffect(() => {
-      fetchImages();
-    }, [initialPhotoIds, refreshTrigger]);
-
-    const handleSelectImage = () => {
-      Alert.alert("Select Image", "This feature is not implemented yet.");
-    };
-
-    const renderImage = ({ item }) => (
-      <Image
-        source={{ uri: item.uri }}
-        style={styles.gridImage}
-        contentFit="cover"
+  const renderDetails = () => (
+    <View style={styles.sectionBody}>
+      <EditableCard
+        icon="storefront"
+        title={t("venueProfile.venueName")}
+        value={venue.title}
+        placeholder={t("venueProfile.venueNamePlaceholder")}
+        onSave={(title) => updateVenue({ title })}
+        onStartEdit={scrollToCard}
       />
-    );
 
-    const renderHeader = () => (
-      <View style={styles.buttonContainer}>
-        <TouchableOpacity
-          style={styles.newEventButton}
-          onPress={handleNewImage}
-        >
-          <Text style={styles.newEventButtonText}>New Image</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={styles.newEventButton}
-          onPress={handleSelectImage}
-        >
-          <Text style={styles.newEventButtonText}>Select Image</Text>
-        </TouchableOpacity>
-      </View>
-    );
-
-    const renderEmpty = () => (
-      <Text style={styles.noEventsText}>No Images</Text>
-    );
-
-    return (
-      <View
-        style={[styles.eventContainer, { flex: 1, backgroundColor: "#121212" }]}
+      <Card
+        icon="place"
+        title={t("venueProfile.location")}
+        action={<SmallButton label={t("venueProfile.setOnMap")} icon="map" onPress={openMapPicker} />}
       >
-        <FlatList
-          data={images}
-          renderItem={renderImage}
-          keyExtractor={(item) => item.id}
-          numColumns={3}
-          contentContainerStyle={styles.imageGrid}
-          ListHeaderComponent={renderHeader}
-          ListEmptyComponent={renderEmpty}
-        />
-      </View>
-    );
-  };
+        {venue.address ? (
+          <Text style={styles.cardText}>{venue.address}</Text>
+        ) : (
+          <Text style={styles.cardPlaceholder}>
+            {t("venueProfile.noLocation")}
+          </Text>
+        )}
+      </Card>
 
-  const groupedDays = groupDays(selectedDays);
+      <Card
+        icon="schedule"
+        title={t("venueProfile.openingHours")}
+        action={<SmallButton label={t("venueProfile.edit")} icon="edit" onPress={() => setHoursOpen(true)} />}
+      >
+        {venue.open_hours ? (
+          <Text style={styles.cardText}>{venue.open_hours}</Text>
+        ) : (
+          <Text style={styles.cardPlaceholder}>{t("venueProfile.addOpeningHours")}</Text>
+        )}
+      </Card>
+
+      <VenueTypesCard selected={venue.types} onChange={(types) => updateVenue({ types })} />
+
+      <EditableCard
+        icon="campaign"
+        title={t("venueProfile.tonightStatus")}
+        value={venue.status}
+        placeholder={t("venueProfile.statusPlaceholder")}
+        multiline
+        onSave={(status) => updateVenue({ status })}
+        onStartEdit={scrollToCard}
+      />
+
+      <EditableCard
+        icon="info-outline"
+        title={t("venueProfile.about")}
+        value={venue.about}
+        placeholder={t("venueProfile.aboutPlaceholder")}
+        multiline
+        onSave={(about) => updateVenue({ about })}
+        onStartEdit={scrollToCard}
+      />
+    </View>
+  );
+
+  const renderEvents = () => (
+    <View style={styles.sectionBody}>
+      <Pressable
+        onPress={() => router.push("/protected/profile-folder/create-event")}
+        style={({ pressed }) => [styles.primaryButton, pressed && styles.pressed]}
+        accessibilityRole="button"
+      >
+        <MaterialIcons name="add" size={22} color={COLORS.onAccent} />
+        <Text style={styles.primaryButtonText}>{t("venueProfile.newEvent")}</Text>
+      </Pressable>
+
+      {!events ? (
+        <ActivityIndicator color={COLORS.accent} style={styles.sectionLoader} />
+      ) : events.length === 0 ? (
+        <View style={styles.emptyState}>
+          <MaterialIcons name="event" size={40} color={COLORS.textSecondary} />
+          <Text style={styles.emptyTitle}>{t("venueProfile.noEvents")}</Text>
+          <Text style={styles.messageText}>{t("venueProfile.noEventsHint")}</Text>
+        </View>
+      ) : (
+        events.map((event) => (
+          <Pressable
+            key={event.id}
+            onPress={() =>
+              router.push(`/protected/profile-folder/create-event?eventId=${event.id}`)
+            }
+            style={({ pressed }) => [styles.eventRow, pressed && styles.eventRowPressed]}
+            accessibilityRole="button"
+            accessibilityLabel={t("venueProfile.editItem", { name: event.title })}
+          >
+            {event.image ? (
+              <Image source={{ uri: event.image }} style={styles.eventImage} contentFit="cover" transition={200} />
+            ) : (
+              <View style={[styles.eventImage, styles.placeholderBox]}>
+                <MaterialIcons name="event" size={24} color={COLORS.textSecondary} />
+              </View>
+            )}
+            <View style={styles.eventText}>
+              <Text style={styles.eventTitle} numberOfLines={2}>
+                {event.title}
+              </Text>
+              {!!event.time && (
+                <Text style={styles.eventTime}>{formatEventTime(event.time)}</Text>
+              )}
+              <Text style={styles.eventEditHint}>{t("venueProfile.tapToEdit")}</Text>
+            </View>
+            <Pressable
+              onPress={() => deleteEvent(event)}
+              hitSlop={10}
+              style={({ pressed }) => [styles.deleteButton, pressed && styles.pressed]}
+              accessibilityRole="button"
+              accessibilityLabel={t("venueProfile.deleteItem", { name: event.title })}
+            >
+              <MaterialIcons name="delete-outline" size={22} color={COLORS.danger} />
+            </Pressable>
+          </Pressable>
+        ))
+      )}
+    </View>
+  );
+
+  const renderPhotos = () => (
+    <View style={styles.sectionBody}>
+      <Text style={styles.cardHint}>
+        {t("venueProfile.photosHint")}
+      </Text>
+      <View style={styles.photoGrid}>
+        <Pressable
+          onPress={addPhoto}
+          disabled={uploading}
+          style={({ pressed }) => [styles.photoTile, styles.addPhotoTile, pressed && styles.pressed]}
+          accessibilityRole="button"
+          accessibilityLabel={t("venueProfile.addPhoto")}
+        >
+          {uploading ? (
+            <ActivityIndicator color={COLORS.accent} />
+          ) : (
+            <>
+              <MaterialIcons name="add-photo-alternate" size={28} color={COLORS.accent} />
+              <Text style={styles.addPhotoText}>{t("venueProfile.addPhoto")}</Text>
+            </>
+          )}
+        </Pressable>
+        {venue.photo_ids.map((url, index) => (
+          <Pressable
+            key={`${index}-${url}`}
+            onPress={() => setGallery({ visible: true, index })}
+            style={styles.photoTile}
+            accessibilityRole="imagebutton"
+            accessibilityLabel={index === 0 ? t("venueProfile.coverPhoto") : t("venueProfile.photoNumber", { number: index + 1 })}
+          >
+            <Image source={{ uri: url }} style={styles.photoImage} contentFit="cover" transition={200} />
+            {index === 0 && (
+              <View style={styles.coverBadge}>
+                <Text style={styles.coverBadgeText}>{t("venueProfile.cover")}</Text>
+              </View>
+            )}
+            <Pressable
+              onPress={() => confirmDeletePhoto(url)}
+              hitSlop={8}
+              style={({ pressed }) => [styles.photoDelete, pressed && styles.pressed]}
+              accessibilityRole="button"
+              accessibilityLabel={t("venueProfile.deletePhoto")}
+            >
+              <MaterialIcons name="delete-outline" size={18} color={COLORS.onImage} />
+            </Pressable>
+          </Pressable>
+        ))}
+      </View>
+    </View>
+  );
+
+  // ── Layout ──
 
   return (
-    <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
-      <LinearGradient
-        colors={["#BB86FC", "#6200EE", "#8B008B", "#1E1E1E"]}
-        style={styles.gradient}
+    <KeyboardAvoidingView
+      style={styles.container}
+      behavior={Platform.OS === "ios" ? "padding" : "height"}
+    >
+      <ScrollView
+        ref={scrollRef}
+        showsVerticalScrollIndicator={false}
+        contentContainerStyle={styles.scrollContent}
+        keyboardShouldPersistTaps="handled"
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={onRefresh}
+            tintColor={COLORS.accent}
+            colors={[COLORS.accent]}
+          />
+        }
       >
-        <View style={styles.container}>
-          <View style={styles.post}>
-            <Image
-              source={{ uri: venue.image }}
-              style={styles.postImage}
-              contentFit="cover"
-            />
-            <EditSaveIcon />
-            <View style={styles.textContainer}>
-              {isEditing ? (
-                <View style={styles.editContainer}>
-                  <View style={styles.inputContainer}>
-                    <FontAwesome
-                      name="building"
-                      size={24}
-                      color="#26A69A"
-                      style={styles.inputIcon}
-                    />
-                    <TextInput
-                      style={styles.titleInput}
-                      value={venue.title}
-                      onChangeText={(text) =>
-                        setVenue({ ...venue, title: text })
-                      }
-                      placeholder="Venue Name"
-                      placeholderTextColor="#8E8E93"
-                    />
-                  </View>
-                  <TouchableOpacity
-                    onPress={handleLocateOnMap}
-                    style={styles.locateButton}
-                  >
-                    <FontAwesome
-                      name="map"
-                      size={20}
-                      color="#26A69A"
-                      style={styles.locateIcon}
-                    />
-                    <Text style={styles.locateButtonText}>Locate On Map</Text>
-                  </TouchableOpacity>
-                  <View style={styles.hoursContainer}>
-                    <TouchableOpacity onPress={() => setShowDaysModal(true)}>
-                      <Text style={styles.pressableText}>
-                        {groupedDays || "Select Days"}
-                      </Text>
-                    </TouchableOpacity>
-                    <Text style={styles.separatorText}>: </Text>
-                    <TouchableOpacity
-                      onPress={() => setShowStartTimeModal(true)}
-                    >
-                      <Text style={styles.pressableText}>
-                        {startHour}
-                        {startPeriod}
-                      </Text>
-                    </TouchableOpacity>
-                    <Text style={styles.separatorText}> - </Text>
-                    <TouchableOpacity onPress={() => setShowEndTimeModal(true)}>
-                      <Text style={styles.pressableText}>
-                        {endHour}
-                        {endPeriod}
-                      </Text>
-                    </TouchableOpacity>
-                  </View>
-                </View>
+        <View ref={contentRef} collapsable={false}>
+        {/* Cover */}
+        <Pressable
+          onPress={() => (cover ? setGallery({ visible: true, index: 0 }) : addPhoto())}
+          style={styles.hero}
+          accessibilityRole="imagebutton"
+          accessibilityLabel={cover ? t("venueProfile.viewCover") : t("venueProfile.addCover")}
+        >
+          {cover ? (
+            <Image source={{ uri: cover }} style={styles.heroImage} contentFit="cover" transition={250} />
+          ) : (
+            <View style={[styles.heroImage, styles.heroPlaceholder]}>
+              {uploading ? (
+                <ActivityIndicator color={COLORS.accent} />
               ) : (
                 <>
-                  <Text style={styles.postTitle}>{venue.title}</Text>
-                  <TouchableOpacity
-                    onPress={() => setShowFullAddressModal(true)}
-                  >
-                    <Text style={styles.postBody} numberOfLines={1}>
-                      {truncateAddress(venue.address)}
-                    </Text>
-                  </TouchableOpacity>
-                  <Text style={styles.postBody}>{venue.openHours}</Text>
+                  <MaterialIcons name="add-photo-alternate" size={40} color={COLORS.accent} />
+                  <Text style={styles.heroPlaceholderText}>{t("venueProfile.addCover")}</Text>
                 </>
               )}
             </View>
+          )}
+          <LinearGradient
+            colors={["transparent", COLORS.background]}
+            style={styles.heroGradient}
+            pointerEvents="none"
+          />
+          <View style={styles.heroText} pointerEvents="none">
+            <View style={[styles.visibilityBadge, isPublic && styles.visibilityBadgePublic]}>
+              <View style={[styles.visibilityDot, isPublic && styles.visibilityDotPublic]} />
+              <Text style={styles.visibilityBadgeText}>{isPublic ? t("venueProfile.public") : t("venueProfile.hidden")}</Text>
+            </View>
+            <Text style={styles.heroTitle} numberOfLines={2}>
+              {venue.title || t("venueProfile.yourVenue")}
+            </Text>
+          </View>
+        </Pressable>
+
+        <View style={styles.content}>
+          {/* Visibility */}
+          <View style={styles.card}>
+            <View style={styles.visibilityRow}>
+              <MaterialIcons
+                name={isPublic ? "visibility" : "visibility-off"}
+                size={24}
+                color={isPublic ? COLORS.success : COLORS.textSecondary}
+              />
+              <View style={styles.visibilityText}>
+                <Text style={styles.cardTitle}>{t("venueProfile.visibleToGuests")}</Text>
+                <Text style={styles.cardHint}>
+                  {isPublic
+                    ? t("venueProfile.publicHint")
+                    : t("venueProfile.hiddenHint")}
+                </Text>
+              </View>
+              {visibilitySaving ? (
+                <ActivityIndicator color={COLORS.accent} />
+              ) : (
+                <Switch
+                  value={isPublic}
+                  onValueChange={toggleVisibility}
+                  trackColor={{ false: COLORS.border, true: COLORS.success }}
+                  thumbColor={COLORS.text}
+                />
+              )}
+            </View>
+
+            {missing.length > 0 && (
+              <View style={styles.checklist}>
+                <View style={styles.progressTrack}>
+                  <View
+                    style={[
+                      styles.progressFill,
+                      { width: `${((checklist.length - missing.length) / checklist.length) * 100}%` },
+                    ]}
+                  />
+                </View>
+                <Text style={styles.checklistTitle}>
+                  {t("venueProfile.progress", { done: checklist.length - missing.length, total: checklist.length })}
+                  {isPublic ? "" : ` · ${t("venueProfile.completeToPublish")}`}
+                </Text>
+                {checklist.map((item) => (
+                  <View key={item.label} style={styles.checklistItem}>
+                    <MaterialIcons
+                      name={item.done ? "check-circle" : "radio-button-unchecked"}
+                      size={18}
+                      color={item.done ? COLORS.success : COLORS.textSecondary}
+                    />
+                    <Text style={[styles.checklistText, item.done && styles.checklistTextDone]}>
+                      {item.label}
+                    </Text>
+                  </View>
+                ))}
+              </View>
+            )}
           </View>
 
-          <Tab.Navigator
-            screenOptions={{
-              tabBarStyle: { backgroundColor: "#121212" },
-              tabBarLabelStyle: { fontWeight: "bold", color: "#FFFFFF" },
-              tabBarActiveTintColor: "#BB86FC",
-              tabBarInactiveTintColor: "#8E8E93",
-              tabBarIndicatorStyle: { backgroundColor: "#BB86FC" },
-            }}
-          >
-            <Tab.Screen name="Status">
-              {() => <StatusScreen initialStatus={venue.status} />}
-            </Tab.Screen>
-            <Tab.Screen name="Events">
-              {() => (
-                <EventsScreen
-                  initialEventIds={venue.event_ids}
-                  refreshTrigger={refreshing}
-                />
-              )}
-            </Tab.Screen>
-            <Tab.Screen name="About">
-              {() => <AboutScreen initialAbout={venue.about} />}
-            </Tab.Screen>
-            <Tab.Screen name="Images">
-              {() => (
-                <ImagesScreen
-                  initialPhotoIds={venue.photo_ids}
-                  refreshTrigger={refreshing}
-                />
-              )}
-            </Tab.Screen>
-          </Tab.Navigator>
+          <SegmentedTabs
+            tabs={SECTIONS.map((item) => ({ key: item.key, label: t(item.labelKey) }))}
+            value={section}
+            onChange={setSection}
+          />
+
+          {section === "details" && renderDetails()}
+          {section === "events" && renderEvents()}
+          {section === "photos" && renderPhotos()}
         </View>
-      </LinearGradient>
-    </TouchableWithoutFeedback>
+        </View>
+      </ScrollView>
+
+      {hoursOpen && (
+        <HoursSheet
+          value={venue.open_hours}
+          onClose={() => setHoursOpen(false)}
+          onSave={(open_hours) => updateVenue({ open_hours })}
+        />
+      )}
+
+      <ImageGallery
+        images={venue.photo_ids}
+        visible={gallery.visible}
+        initialIndex={gallery.index}
+        onClose={() => setGallery({ visible: false, index: 0 })}
+      />
+    </KeyboardAvoidingView>
   );
 }
 
-const IMAGE_WIDTH = (SCREEN_WIDTH - 30) / 3;
-const IMAGE_HEIGHT = (IMAGE_WIDTH * 4) / 3;
-
-const styles = StyleSheet.create({
-  gradient: {
-    flex: 1,
-  },
+const useStyles = makeStyles((COLORS) => ({
   container: {
     flex: 1,
-    backgroundColor: "#121212",
+    backgroundColor: COLORS.background,
   },
-  post: {
-    height: 200,
+  centered: {
+    flex: 1,
+    backgroundColor: COLORS.background,
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 24,
+  },
+  scrollContent: {
+    paddingBottom: 40,
+  },
+  pressed: {
+    opacity: 0.6,
+  },
+
+  // Hero
+  hero: {
     width: "100%",
-    borderWidth: 1,
-    borderColor: "#333333",
-    position: "relative",
+    aspectRatio: COVER_RATIO,
   },
-  postImage: {
-    ...StyleSheet.absoluteFillObject,
-    zIndex: 1,
+  heroImage: {
+    width: "100%",
+    height: "100%",
   },
-  textContainer: {
+  heroPlaceholder: {
+    backgroundColor: COLORS.surface,
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+  },
+  heroPlaceholderText: {
+    color: COLORS.accent,
+    fontSize: 15,
+    fontWeight: "600",
+  },
+  heroGradient: {
     position: "absolute",
-    bottom: 0,
     left: 0,
     right: 0,
-    padding: 10,
-    backgroundColor: "rgba(0, 0, 0, 0.3)",
-    zIndex: 2,
-    justifyContent: "flex-end",
+    bottom: 0,
+    height: "60%",
   },
-  editContainer: {
-    alignItems: "flex-start",
-    width: "100%",
+  heroText: {
+    position: "absolute",
+    left: 16,
+    right: 16,
+    bottom: 14,
+    gap: 8,
   },
-  postTitle: {
+  heroTitle: {
+    color: COLORS.text,
     fontSize: 28,
-    fontWeight: "bold",
-    color: "#FFFFFF",
-    textShadowColor: "rgba(0, 0, 0, 0.75)",
-    textShadowOffset: { width: -1, height: 1 },
-    textShadowRadius: 2,
+    fontWeight: "800",
   },
-  postBody: {
-    fontSize: 14,
-    fontWeight: "700",
-    color: "#FFFFFF",
-    marginTop: 5,
-    textShadowColor: "rgba(0, 0, 0, 0.75)",
-    textShadowOffset: { width: -1, height: 1 },
-    textShadowRadius: 2,
-  },
-  inputContainer: {
+  visibilityBadge: {
+    alignSelf: "flex-start",
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#1E1E1E",
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: "#333333",
-    marginBottom: 5,
-    width: "100%",
-  },
-  inputIcon: {
-    marginLeft: 10,
-    marginRight: 5,
-  },
-  titleInput: {
-    flex: 1,
-    fontSize: 28,
-    fontWeight: "bold",
-    color: "#FFFFFF",
-    padding: 5,
-  },
-  bodyInput: {
-    flex: 1,
-    fontSize: 15,
-    color: "#E0E0E0",
-    padding: 5,
-  },
-  locateButton: {
-    flexDirection: "row",
-    alignItems: "center",
-    marginTop: 5,
-    marginLeft: 10,
-  },
-  locateIcon: {
-    marginRight: 5,
-  },
-  locateButtonText: {
-    fontSize: 15,
-    color: "#BB86FC",
-    fontWeight: "bold",
-  },
-  iconContainer: {
-    position: "absolute",
-    left: 10,
-    top: 10,
-    width: 40,
-    height: 40,
-    justifyContent: "center",
-    alignItems: "center",
-    backgroundColor: "rgba(30, 30, 30, 0.7)",
-    borderWidth: 2,
-    borderColor: "#BB86FC",
-    borderRadius: 8,
-    zIndex: 3,
-  },
-  switchContainer: {
-    position: "absolute",
-    right: 10,
-    top: 10,
-    width: 60,
-    height: 34,
-    justifyContent: "center",
-    alignItems: "center",
-    transform: [{ scaleX: 1.2 }, { scaleY: 1.2 }],
-    zIndex: 3,
-  },
-  tabContent: {
-    padding: 20,
-    alignItems: "center",
-  },
-  tabTextContainer: {
-    backgroundColor: "#252525",
-    borderRadius: 8,
-    borderWidth: 2,
-    borderColor: "#BB86FC",
-    width: "95%",
-    padding: 15,
-    marginTop: 15,
-    alignSelf: "center",
-  },
-  tabContentText: {
-    fontSize: 14,
-    fontWeight: "600",
-    color: "#E0E0E0",
-    textAlign: "left",
-  },
-  statusInput: {
-    backgroundColor: "#1E1E1E",
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: "#333333",
-    padding: 10,
-    width: "100%",
-    color: "#FFFFFF",
-    fontSize: 16,
-    textAlign: "left",
-    minHeight: 200,
-  },
-  inputScroll: {
-    maxHeight: 200,
-    width: "100%",
-  },
-  editButton: {
-    backgroundColor: "#BB86FC",
-    borderRadius: 8,
-    paddingVertical: 8,
-    paddingHorizontal: 16,
-    alignItems: "center",
-    marginBottom: 0,
-  },
-  editButtonText: {
-    fontSize: 16,
-    fontWeight: "bold",
-    color: "#FFFFFF",
-  },
-  saveButton: {
-    backgroundColor: "#FF69B4",
-    borderRadius: 8,
-    paddingVertical: 8,
-    paddingHorizontal: 16,
-    alignItems: "center",
-    marginTop: 10,
-  },
-  saveButtonText: {
-    fontSize: 16,
-    fontWeight: "bold",
-    color: "#FFFFFF",
-  },
-  eventContainer: {
-    flex: 1,
+    gap: 6,
+    backgroundColor: "rgba(0, 0, 0, 0.6)",
+    borderRadius: 12,
+    paddingVertical: 4,
     paddingHorizontal: 10,
-    paddingTop: 5,
   },
-  buttonContainer: {
-    flexDirection: "row",
-    justifyContent: "center",
-    marginTop: 15,
-    marginBottom: 13,
+  visibilityBadgePublic: {
+    backgroundColor: "rgba(52, 211, 153, 0.2)",
+  },
+  visibilityDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: COLORS.textSecondary,
+  },
+  visibilityDotPublic: {
+    backgroundColor: COLORS.success,
+  },
+  visibilityBadgeText: {
+    color: COLORS.onImage,
+    fontSize: 12,
+    fontWeight: "700",
+  },
+
+  // Content
+  content: {
+    paddingHorizontal: 16,
+    paddingTop: 8,
+    gap: 16,
+  },
+  sectionBody: {
+    gap: 12,
+  },
+  sectionLoader: {
+    paddingVertical: 32,
+  },
+
+  // Cards
+  card: {
+    backgroundColor: COLORS.surface,
+    borderRadius: 16,
+    padding: 14,
     gap: 10,
   },
-  newEventButton: {
-    backgroundColor: "#BB86FC",
-    borderRadius: 8,
-    paddingVertical: 8,
-    paddingHorizontal: 16,
-    alignItems: "center",
-  },
-  newEventButtonText: {
-    fontSize: 16,
-    fontWeight: "bold",
-    color: "#FFFFFF",
-  },
-  eventListContainer: {
-    paddingHorizontal: 5,
-    paddingBottom: 20,
-  },
-  eventPost: {
+  cardHeader: {
     flexDirection: "row",
-    height: 100,
-    width: "100%",
-    marginBottom: 10,
-    backgroundColor: "#1E1E1E",
-    borderRadius: 8,
+    alignItems: "center",
+    gap: 10,
+  },
+  cardIcon: {
+    width: 32,
+    height: 32,
+    borderRadius: 10,
+    backgroundColor: "rgba(167, 139, 250, 0.12)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  cardTitle: {
+    flex: 1,
+    color: COLORS.text,
+    fontSize: 16,
+    fontWeight: "700",
+  },
+  cardText: {
+    color: COLORS.text,
+    fontSize: 15,
+    lineHeight: 21,
+  },
+  cardPlaceholder: {
+    color: COLORS.placeholder,
+    fontSize: 15,
+    lineHeight: 21,
+  },
+  cardHint: {
+    color: COLORS.textSecondary,
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  smallButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    borderRadius: 12,
     borderWidth: 1,
-    borderColor: "#333333",
+    borderColor: "rgba(167, 139, 250, 0.45)",
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+  },
+  smallButtonPrimary: {
+    backgroundColor: COLORS.accent,
+    borderColor: COLORS.accent,
+  },
+  smallButtonText: {
+    color: COLORS.accent,
+    fontSize: 13,
+    fontWeight: "600",
+  },
+  smallButtonTextPrimary: {
+    color: COLORS.onAccent,
+    fontWeight: "700",
+  },
+  input: {
+    backgroundColor: COLORS.background,
+    color: COLORS.text,
+    fontSize: 15,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: COLORS.accent,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  inputMultiline: {
+    minHeight: 96,
+    textAlignVertical: "top",
+  },
+  editActions: {
+    flexDirection: "row",
+    justifyContent: "flex-end",
+    gap: 8,
+  },
+  savingSpinner: {
+    paddingHorizontal: 18,
+  },
+
+  // Venue types
+  chipWrap: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+  chip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: "rgba(167, 139, 250, 0.45)",
+    paddingVertical: 7,
+    paddingHorizontal: 12,
+  },
+  chipActive: {
+    backgroundColor: COLORS.accent,
+    borderColor: COLORS.accent,
+  },
+  chipText: {
+    color: COLORS.text,
+    fontSize: 13,
+    fontWeight: "600",
+  },
+  chipTextActive: {
+    color: COLORS.onAccent,
+  },
+
+  // Visibility
+  visibilityRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+  },
+  visibilityText: {
+    flex: 1,
+    gap: 2,
+  },
+  checklist: {
+    gap: 8,
+    paddingTop: 4,
+  },
+  progressTrack: {
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: COLORS.surfacePressed,
+    overflow: "hidden",
+  },
+  progressFill: {
+    height: "100%",
+    borderRadius: 3,
+    backgroundColor: COLORS.accent,
+  },
+  checklistTitle: {
+    color: COLORS.textSecondary,
+    fontSize: 13,
+    fontWeight: "600",
+  },
+  checklistItem: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  checklistText: {
+    color: COLORS.text,
+    fontSize: 14,
+  },
+  checklistTextDone: {
+    color: COLORS.textSecondary,
+    textDecorationLine: "line-through",
+  },
+
+  // Events
+  primaryButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    backgroundColor: COLORS.accent,
+    borderRadius: 14,
+    paddingVertical: 13,
+  },
+  primaryButtonText: {
+    color: COLORS.onAccent,
+    fontSize: 16,
+    fontWeight: "700",
+  },
+  eventRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: COLORS.surface,
+    borderRadius: 16,
     padding: 10,
+  },
+  eventRowPressed: {
+    backgroundColor: COLORS.surfacePressed,
   },
   eventImage: {
-    width: 80,
-    height: "100%",
-    borderRadius: 8,
+    width: 72,
+    height: 72,
+    borderRadius: 12,
   },
-  eventTextContainer: {
-    flex: 1,
-    paddingLeft: 10,
+  placeholderBox: {
+    backgroundColor: COLORS.surfacePressed,
+    alignItems: "center",
     justifyContent: "center",
+  },
+  eventText: {
+    flex: 1,
+    marginLeft: 12,
+    gap: 3,
   },
   eventTitle: {
+    color: COLORS.text,
     fontSize: 16,
-    fontWeight: "bold",
-    color: "#FFFFFF",
-  },
-  eventBody: {
-    fontSize: 12,
-    color: "#E0E0E0",
-    marginTop: 5,
+    fontWeight: "700",
   },
   eventTime: {
+    color: COLORS.accent,
+    fontSize: 13,
+    fontWeight: "600",
+  },
+  eventEditHint: {
+    color: COLORS.textSecondary,
     fontSize: 12,
-    color: "#E0E0E0",
-    marginTop: 5,
   },
-  eventIconsContainer: {
-    flexDirection: "row",
-    justifyContent: "center",
+  deleteButton: {
+    padding: 8,
+  },
+  emptyState: {
     alignItems: "center",
-    paddingRight: 10,
+    paddingVertical: 32,
+    paddingHorizontal: 24,
   },
-  iconButton: {
-    paddingHorizontal: 6,
-  },
-  noEventsText: {
-    fontSize: 20,
-    fontWeight: "bold",
-    color: "#FFFFFF",
-    textAlign: "center",
-    marginTop: 20,
-  },
-  imageGrid: {
-    paddingHorizontal: 5,
-    paddingBottom: 20,
-  },
-  gridImage: {
-    width: IMAGE_WIDTH,
-    height: IMAGE_HEIGHT,
-    borderRadius: 8,
-    marginBottom: 10,
-    marginHorizontal: 2.5,
-  },
-  hoursContainer: {
-    flexDirection: "row",
-    alignItems: "center",
+  emptyTitle: {
+    color: COLORS.text,
+    fontSize: 17,
+    fontWeight: "700",
     marginTop: 10,
-    marginLeft: 10,
+  },
+
+  // Photos
+  photoGrid: {
+    flexDirection: "row",
     flexWrap: "wrap",
+    gap: PHOTO_GAP,
   },
-  pressableText: {
-    fontSize: 15,
-    color: "#BB86FC",
-    fontWeight: "bold",
+  photoTile: {
+    width: PHOTO_SIZE,
+    height: PHOTO_SIZE,
+    borderRadius: 12,
+    overflow: "hidden",
+    backgroundColor: COLORS.surface,
   },
-  separatorText: {
-    fontSize: 15,
-    color: "#E0E0E0",
-    marginHorizontal: 5,
-  },
-  modalContainer: {
-    flex: 1,
+  addPhotoTile: {
+    borderWidth: 1.5,
+    borderStyle: "dashed",
+    borderColor: "rgba(167, 139, 250, 0.5)",
+    alignItems: "center",
     justifyContent: "center",
-    alignItems: "center",
-    backgroundColor: "rgba(0, 0, 0, 0.5)",
+    gap: 4,
   },
-  modalContent: {
-    backgroundColor: "#1E1E1E",
-    padding: 20,
-    borderRadius: 10,
-    width: "80%",
-    alignItems: "center",
+  addPhotoText: {
+    color: COLORS.accent,
+    fontSize: 12,
+    fontWeight: "600",
   },
-  modalTitle: {
-    fontSize: 18,
-    fontWeight: "bold",
-    color: "#FFFFFF",
-    marginBottom: 10,
-  },
-  modalAddressText: {
-    fontSize: 16,
-    color: "#E0E0E0",
-    textAlign: "center",
-    marginBottom: 20,
-  },
-  dayOption: {
-    padding: 10,
+  photoImage: {
     width: "100%",
+    height: "100%",
+  },
+  photoDelete: {
+    position: "absolute",
+    top: 6,
+    right: 6,
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    backgroundColor: "rgba(0, 0, 0, 0.6)",
     alignItems: "center",
+    justifyContent: "center",
   },
-  dayOptionText: {
-    color: "#FFFFFF",
-    fontSize: 16,
-  },
-  pickerContainer: {
-    flexDirection: "row",
-    justifyContent: "space-around",
-    width: "100%",
-  },
-  picker: {
-    color: "#FFFFFF",
-    backgroundColor: "#333333",
-    width: "45%",
-    borderWidth: 1,
-    borderColor: "#26A69A",
+  coverBadge: {
+    position: "absolute",
+    left: 6,
+    bottom: 6,
+    backgroundColor: "rgba(0, 0, 0, 0.65)",
     borderRadius: 8,
+    paddingVertical: 2,
+    paddingHorizontal: 7,
   },
-  confirmButton: {
-    backgroundColor: "#BB86FC",
-    borderRadius: 8,
-    paddingVertical: 8,
-    paddingHorizontal: 16,
-    alignItems: "center",
+  coverBadgeText: {
+    color: COLORS.onImage,
+    fontSize: 11,
+    fontWeight: "700",
+  },
+
+  // Hours sheet
+  sheetBackdrop: {
+    flex: 1,
+    justifyContent: "flex-end",
+    backgroundColor: "rgba(0, 0, 0, 0.55)",
+  },
+  sheet: {
+    backgroundColor: COLORS.background,
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    paddingHorizontal: 20,
+    paddingBottom: 28,
+  },
+  sheetHandle: {
+    alignSelf: "center",
+    width: 40,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: COLORS.border,
     marginTop: 10,
   },
-  confirmButtonText: {
-    fontSize: 16,
-    fontWeight: "bold",
-    color: "#FFFFFF",
+  sheetTitle: {
+    color: COLORS.text,
+    fontSize: 20,
+    fontWeight: "800",
+    marginTop: 14,
   },
-});
+  sheetLabel: {
+    color: COLORS.textSecondary,
+    fontSize: 13,
+    fontWeight: "700",
+    textTransform: "uppercase",
+    letterSpacing: 0.6,
+    marginTop: 18,
+    marginBottom: 10,
+  },
+  dayRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+  },
+  dayChip: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    borderWidth: 1,
+    borderColor: "rgba(167, 139, 250, 0.45)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  dayChipActive: {
+    backgroundColor: COLORS.accent,
+    borderColor: COLORS.accent,
+  },
+  dayChipText: {
+    color: COLORS.text,
+    fontSize: 13,
+    fontWeight: "700",
+  },
+  dayChipTextActive: {
+    color: COLORS.onAccent,
+  },
+  presetRow: {
+    flexDirection: "row",
+    gap: 8,
+    marginTop: 10,
+  },
+  stepperRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    marginBottom: 10,
+  },
+  stepperLabel: {
+    width: 60,
+    color: COLORS.text,
+    fontSize: 15,
+    fontWeight: "600",
+  },
+  stepper: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: COLORS.surface,
+    borderRadius: 12,
+  },
+  stepperButton: {
+    padding: 10,
+  },
+  stepperValue: {
+    minWidth: 30,
+    textAlign: "center",
+    color: COLORS.text,
+    fontSize: 18,
+    fontWeight: "700",
+  },
+  periodToggle: {
+    flexDirection: "row",
+    backgroundColor: COLORS.surface,
+    borderRadius: 12,
+    padding: 3,
+  },
+  periodOption: {
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 9,
+  },
+  periodOptionActive: {
+    backgroundColor: COLORS.accent,
+  },
+  periodText: {
+    color: COLORS.textSecondary,
+    fontSize: 14,
+    fontWeight: "700",
+  },
+  periodTextActive: {
+    color: COLORS.onAccent,
+  },
+  hoursPreview: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    backgroundColor: COLORS.surface,
+    borderRadius: 12,
+    padding: 12,
+    marginTop: 6,
+  },
+  hoursPreviewText: {
+    flex: 1,
+    color: COLORS.text,
+    fontSize: 15,
+    fontWeight: "600",
+  },
+  sheetSave: {
+    marginTop: 16,
+    backgroundColor: COLORS.accent,
+    borderRadius: 14,
+    paddingVertical: 14,
+    alignItems: "center",
+  },
+  sheetSaveDisabled: {
+    opacity: 0.4,
+  },
+  sheetSaveText: {
+    color: COLORS.onAccent,
+    fontSize: 16,
+    fontWeight: "800",
+  },
+
+  // Error
+  messageText: {
+    color: COLORS.textSecondary,
+    fontSize: 14,
+    textAlign: "center",
+    marginTop: 8,
+  },
+  retryButton: {
+    marginTop: 16,
+    backgroundColor: COLORS.surface,
+    borderRadius: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 20,
+  },
+  retryButtonText: {
+    color: COLORS.text,
+    fontSize: 14,
+    fontWeight: "600",
+  },
+}));

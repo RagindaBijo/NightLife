@@ -1,377 +1,404 @@
-import { FontAwesome, MaterialIcons } from "@expo/vector-icons";
-import AsyncStorage from "@react-native-async-storage/async-storage";
+import { MaterialIcons } from "@expo/vector-icons";
 import { Image } from "expo-image";
-import { Link } from "expo-router";
-import { useCallback, useEffect, useState } from "react";
+import { useRouter } from "expo-router";
+import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import {
+  ActivityIndicator,
+  FlatList,
+  Pressable,
   RefreshControl,
-  ScrollView,
   StyleSheet,
   Text,
   TextInput,
-  TouchableOpacity,
   View,
 } from "react-native";
+import InterestCheck from "../../../../components/InterestCheck";
+import { api, getSession } from "../../../../lib/api";
+import { parseEventTime } from "../../../../lib/format";
+import { interests } from "../../../../lib/toggles";
+import { useI18n } from "../../../../lib/i18n";
+import { makeStyles, useTheme } from "../../../../lib/theme-context";
+
+const EventCard = memo(function EventCard({ event, showInterest, onPress }) {
+  const { colors: COLORS } = useTheme();
+  const styles = useStyles();
+  useI18n();
+  const when = parseEventTime(event.time);
+
+  return (
+    <Pressable
+      onPress={onPress}
+      style={({ pressed }) => [styles.card, pressed && styles.cardPressed]}
+      accessibilityRole="button"
+      accessibilityLabel={event.title}
+    >
+      <View style={styles.imageWrapper}>
+        {event.image ? (
+          <Image source={{ uri: event.image }} style={styles.image} contentFit="cover" transition={250} />
+        ) : (
+          <View style={[styles.image, styles.imagePlaceholder]}>
+            <MaterialIcons name="event" size={40} color={COLORS.textSecondary} />
+          </View>
+        )}
+        {when && (
+          <View style={styles.dateBadge}>
+            <Text style={styles.dateDay}>{when.day}</Text>
+            <Text style={styles.dateMonth}>{when.month}</Text>
+          </View>
+        )}
+        {showInterest && (
+          <View style={styles.interestButton}>
+            <InterestCheck
+              eventId={event.id}
+              size={24}
+              activeColor={COLORS.accent}
+              inactiveColor={COLORS.onImage}
+              style={styles.interestTouch}
+            />
+          </View>
+        )}
+      </View>
+
+      <View style={styles.info}>
+        <Text style={styles.title} numberOfLines={2}>
+          {event.title}
+        </Text>
+        <View style={styles.infoRow}>
+          <MaterialIcons name="storefront" size={16} color={COLORS.accent} />
+          <Text style={styles.infoText} numberOfLines={1}>
+            {event.venueName}
+          </Text>
+        </View>
+        <View style={styles.infoRow}>
+          <MaterialIcons name="schedule" size={16} color={COLORS.accent} />
+          <Text style={styles.infoText} numberOfLines={1}>
+            {when ? `${when.day} ${when.month} · ${when.hour}` : event.time}
+          </Text>
+        </View>
+      </View>
+    </Pressable>
+  );
+});
 
 export default function Events() {
-  const [events, setEvents] = useState([]);
-  const [filteredEvents, setFilteredEvents] = useState([]);
-  const [searchQuery, setSearchQuery] = useState("");
-  const [loading, setLoading] = useState(true);
+  const { colors: COLORS } = useTheme();
+  const { t } = useI18n();
+  const styles = useStyles();
+  const router = useRouter();
+  const [events, setEvents] = useState(null);
   const [error, setError] = useState(null);
+  const [searchQuery, setSearchQuery] = useState("");
   const [userType, setUserType] = useState(null);
-  const [interestedIds, setInterestedIds] = useState([]);
   const [refreshing, setRefreshing] = useState(false);
-  const apiUrl = "https://night-life-api.elevator-rand.workers.dev";
 
-  const fetchEvents = async () => {
-    try {
-      setLoading(true);
-      setError(null);
-      const token = await AsyncStorage.getItem("token");
-      const storedUserType = await AsyncStorage.getItem("userType");
-      setUserType(storedUserType);
-
-      if (!token) {
-        setError("Authentication token not found. Please log in.");
-        return;
-      }
-
-      const response = await fetch(`${apiUrl}/api/events`, {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed to fetch events: ${response.status}`);
-      }
-
-      const data = await response.json();
-      const eventsWithVenue = await Promise.all(
-        data.map(async (event, index) => {
-          let venueName = "Unknown";
-          if (event.venue_id) {
-            try {
-              const venueResponse = await fetch(
-                `${apiUrl}/api/venue/${event.venue_id}`,
-                {
-                  method: "GET",
-                  headers: {
-                    Authorization: `Bearer ${token}`,
-                    "Content-Type": "application/json",
-                  },
-                },
+  const fetchEvents = useCallback(
+    () =>
+      Promise.all([getSession(), api("/api/events")])
+        .then(async ([session, data]) => {
+          // Look each venue up once, even if several events share it
+          const venueNames = new Map();
+          const venueName = (venueId) => {
+            if (!venueId) return Promise.resolve(t("event.unknownVenue"));
+            if (!venueNames.has(venueId)) {
+              venueNames.set(
+                venueId,
+                api(`/api/venue/${venueId}`)
+                  .then((venue) => venue.title || t("event.unknownVenue"))
+                  .catch((err) => {
+                    console.warn(`Error fetching venue ${venueId}:`, err.message);
+                    return t("event.unknownVenue");
+                  }),
               );
-              if (venueResponse.ok) {
-                const venueData = await venueResponse.json();
-                venueName = venueData.title || "Unknown";
-              } else {
-                console.warn(
-                  `Failed to fetch venue ${event.venue_id}: ${venueResponse.status}`,
-                );
-              }
-            } catch (err) {
-              console.warn(`Error fetching venue ${event.venue_id}:`, err);
             }
-          }
-          return {
-            id: event.id.toString(),
-            title: event.title || `Event ${index + 1}`,
-            venueName,
-            time: event.time || "No time provided",
-            image:
-              event.photo_id ||
-              `https://picsum.photos/200/200?random=${index + 1}`,
+            return venueNames.get(venueId);
           };
-        }),
-      );
-      setEvents(eventsWithVenue);
-      setFilteredEvents(eventsWithVenue);
 
-      if (storedUserType === "1") {
-        const userId = await AsyncStorage.getItem("userId");
-        if (userId) {
-          const userResponse = await fetch(`${apiUrl}/api/user/${userId}`, {
-            method: "GET",
-            headers: {
-              Authorization: `Bearer ${token}`,
-              "Content-Type": "application/json",
-            },
-          });
-          if (userResponse.ok) {
-            const userData = await userResponse.json();
-            const ids = userData.interested_ids
-              ? userData.interested_ids
-                  .split(",")
-                  .map((id) => id.trim())
-                  .filter(Boolean)
-              : [];
-            setInterestedIds(ids);
-          } else {
-            console.warn("Failed to fetch user interested_ids");
-          }
-        }
-      }
-    } catch (err) {
-      console.error("Error fetching events:", err);
-      setError("Failed to load events. Please try again.");
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
+          const list = await Promise.all(
+            data.map(async (event, index) => ({
+              id: event.id.toString(),
+              title: event.title || t("event.numbered", { number: index + 1 }),
+              venueName: await venueName(event.venue_id),
+              time: event.time || t("event.noTime"),
+              image: event.photo_id || null,
+            })),
+          );
+
+          interests.seed(data, "is_interested");
+          setUserType(session?.userType ?? null);
+          setEvents(list);
+          setError(null);
+        })
+        .catch((err) => {
+          console.error("Error fetching events:", err.message);
+          setError(
+            err.status === 0
+              ? t("common.cantConnect")
+              : t("home.eventsLoadError"),
+          );
+        }),
+    [t],
+  );
+
+  useEffect(() => {
+    fetchEvents();
+  }, [fetchEvents]);
+
+  const onRefresh = async () => {
+    setRefreshing(true);
+    await fetchEvents();
+    setRefreshing(false);
   };
 
-  useEffect(() => {
-    fetchEvents();
-  }, []);
+  const filteredEvents = useMemo(() => {
+    const query = searchQuery.trim().toLowerCase();
+    if (!events) return [];
+    return query
+      ? events.filter((event) => event.title.toLowerCase().includes(query))
+      : events;
+  }, [events, searchQuery]);
 
-  useEffect(() => {
-    const filtered = events.filter((event) =>
-      event.title.toLowerCase().includes(searchQuery.toLowerCase()),
+  const renderEvent = useCallback(
+    ({ item }) => (
+      <EventCard
+        event={item}
+        showInterest={userType === "1"}
+        onPress={() => router.push(`/protected/home/eventId/${item.id}`)}
+      />
+    ),
+    [userType, router],
+  );
+
+  const renderEmpty = () => {
+    if (!events && error) {
+      return (
+        <View style={styles.message}>
+          <MaterialIcons name="cloud-off" size={44} color={COLORS.textSecondary} />
+          <Text style={styles.messageText}>{error}</Text>
+          <Pressable
+            onPress={fetchEvents}
+            style={({ pressed }) => [styles.retryButton, pressed && styles.pressed]}
+          >
+            <Text style={styles.retryButtonText}>{t("common.tryAgain")}</Text>
+          </Pressable>
+        </View>
+      );
+    }
+    if (!events) {
+      return (
+        <View style={styles.message}>
+          <ActivityIndicator size="large" color={COLORS.accent} />
+        </View>
+      );
+    }
+    return (
+      <View style={styles.message}>
+        <MaterialIcons
+          name={searchQuery ? "search-off" : "event"}
+          size={44}
+          color={COLORS.textSecondary}
+        />
+        <Text style={styles.messageTitle}>
+          {searchQuery ? t("home.noEventsMatch") : t("home.noEvents")}
+        </Text>
+        <Text style={styles.messageText}>
+          {searchQuery ? t("home.tryDifferentName") : t("home.noEventsHint")}
+        </Text>
+      </View>
     );
-    setFilteredEvents(filtered);
-  }, [searchQuery, events]);
-
-  const onRefresh = useCallback(() => {
-    setRefreshing(true);
-    fetchEvents();
-  }, []);
+  };
 
   return (
     <View style={styles.container}>
       <View style={styles.searchContainer}>
-        <MaterialIcons
-          name="search"
-          size={24}
-          color="#888888"
-          style={styles.searchIcon}
-        />
+        <MaterialIcons name="search" size={22} color={COLORS.textSecondary} />
         <TextInput
-          style={styles.searchBar}
+          style={styles.searchInput}
           value={searchQuery}
           onChangeText={setSearchQuery}
-          placeholder="Search"
-          placeholderTextColor="#888888"
+          placeholder={t("home.searchEvents")}
+          placeholderTextColor={COLORS.placeholder}
+          selectionColor={COLORS.accent}
+          autoCorrect={false}
+          returnKeyType="search"
         />
+        {!!searchQuery && (
+          <Pressable onPress={() => setSearchQuery("")} hitSlop={10} accessibilityLabel={t("common.clearSearch")}>
+            <MaterialIcons name="cancel" size={20} color={COLORS.textSecondary} />
+          </Pressable>
+        )}
       </View>
-      <ScrollView
-        style={styles.scrollView}
+      <FlatList
+        data={filteredEvents}
+        keyExtractor={(event) => event.id}
+        renderItem={renderEvent}
+        contentContainerStyle={styles.list}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
+        showsVerticalScrollIndicator={false}
+        ListEmptyComponent={renderEmpty}
         refreshControl={
           <RefreshControl
             refreshing={refreshing}
             onRefresh={onRefresh}
-            tintColor="#BB86FC"
-            colors={["#BB86FC"]}
+            tintColor={COLORS.accent}
+            colors={[COLORS.accent]}
           />
         }
-      >
-        {loading ? (
-          <Text style={styles.statusText}>Loading events...</Text>
-        ) : error ? (
-          <Text style={styles.statusText}>{error}</Text>
-        ) : filteredEvents.length === 0 ? (
-          <Text style={styles.statusText}>
-            {searchQuery
-              ? "No events match your search"
-              : "No events available"}
-          </Text>
-        ) : (
-          filteredEvents.map((event) => (
-            <Link
-              href={`/protected/home/eventId/${event.id}`}
-              key={event.id}
-              asChild
-            >
-              <TouchableOpacity style={styles.post}>
-                <Image
-                  source={{ uri: event.image }}
-                  style={styles.postImage}
-                  contentFit="cover"
-                />
-                <View style={styles.textContainer}>
-                  <View style={styles.textContent}>
-                    <Text style={styles.postTitle}>{event.title}</Text>
-                    <Text style={styles.postBody}>{event.venueName}</Text>
-                    <Text style={styles.postTime}>{event.time}</Text>
-                  </View>
-                  {userType === "1" && (
-                    <CheckIcon
-                      eventId={event.id}
-                      interestedIds={interestedIds}
-                      setInterestedIds={setInterestedIds}
-                    />
-                  )}
-                </View>
-              </TouchableOpacity>
-            </Link>
-          ))
-        )}
-      </ScrollView>
+      />
     </View>
   );
 }
 
-function CheckIcon({ eventId, interestedIds, setInterestedIds }) {
-  const apiUrl = "https://night-life-api.elevator-rand.workers.dev";
-  const isActive = interestedIds.includes(String(eventId));
-
-  const toggleCheck = async () => {
-    try {
-      const token = await AsyncStorage.getItem("token");
-      const userId = await AsyncStorage.getItem("userId");
-      if (!token || !userId) return;
-
-      const previousIds = [...interestedIds];
-      const eventStr = String(eventId);
-      let newIds = [...previousIds];
-
-      if (isActive) {
-        newIds = newIds.filter((id) => id !== eventStr);
-      } else {
-        if (!newIds.includes(eventStr)) {
-          newIds.push(eventStr);
-        }
-      }
-
-      setInterestedIds(newIds);
-
-      const newInterestedStr = newIds.length > 0 ? newIds.join(",") : "";
-
-      const response = await fetch(`${apiUrl}/api/user/${userId}`, {
-        method: "PUT",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          interested_ids: newInterestedStr,
-        }),
-      });
-
-      if (response.ok) {
-        const refetchResponse = await fetch(`${apiUrl}/api/user/${userId}`, {
-          method: "GET",
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
-          },
-        });
-
-        if (refetchResponse.ok) {
-          const updatedData = await refetchResponse.json();
-          const updatedIds = updatedData.interested_ids
-            ? updatedData.interested_ids
-                .split(",")
-                .map((id) => id.trim())
-                .filter(Boolean)
-            : [];
-          setInterestedIds(updatedIds);
-        } else {
-          setInterestedIds(previousIds);
-        }
-      } else {
-        setInterestedIds(previousIds);
-        console.error(
-          "Failed to update interested_ids:",
-          await response.text(),
-        );
-      }
-    } catch (error) {
-      setInterestedIds(interestedIds);
-      console.error("Error toggling check:", error);
-    }
-  };
-
-  return (
-    <TouchableOpacity onPress={toggleCheck} style={styles.checkContainer}>
-      <FontAwesome
-        name="check-square"
-        size={32}
-        color={isActive ? "#0000FF" : "#808080"}
-      />
-    </TouchableOpacity>
-  );
-}
-
-const styles = StyleSheet.create({
+const useStyles = makeStyles((COLORS) => ({
   container: {
     flex: 1,
-    backgroundColor: "#121212",
-    paddingVertical: 2,
-    paddingHorizontal: 5,
+    backgroundColor: COLORS.background,
   },
+  pressed: {
+    opacity: 0.6,
+  },
+
+  // Search
   searchContainer: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#2A2A2A",
-    borderRadius: 10,
-    marginTop: 2,
+    gap: 8,
+    backgroundColor: COLORS.surface,
+    borderRadius: 14,
+    marginHorizontal: 12,
+    marginTop: 10,
     marginBottom: 4,
-    paddingHorizontal: 10,
+    paddingHorizontal: 12,
   },
-  searchIcon: {
-    marginRight: 8,
-  },
-  searchBar: {
+  searchInput: {
     flex: 1,
-    padding: 10,
-    color: "#FFFFFF",
+    color: COLORS.text,
     fontSize: 16,
-    backgroundColor: "#2A2A2A",
+    paddingVertical: 11,
   },
-  scrollView: {
-    flex: 1,
+
+  // List
+  list: {
+    flexGrow: 1,
+    padding: 12,
+    gap: 14,
   },
-  post: {
-    flexDirection: "row",
-    height: 100,
+
+  // Card
+  card: {
+    backgroundColor: COLORS.surface,
+    borderRadius: 18,
+    overflow: "hidden",
+  },
+  cardPressed: {
+    opacity: 0.85,
+    transform: [{ scale: 0.99 }],
+  },
+  imageWrapper: {
     width: "100%",
-    marginBottom: 10,
-    backgroundColor: "#1E1E1E",
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: "#333333",
-    padding: 10,
+    aspectRatio: 16 / 9,
   },
-  postImage: {
-    width: 80,
+  image: {
+    width: "100%",
     height: "100%",
-    borderRadius: 8,
   },
-  textContainer: {
-    flex: 1,
-    paddingLeft: 10,
-    flexDirection: "row",
+  imagePlaceholder: {
+    backgroundColor: COLORS.surfacePressed,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  dateBadge: {
+    position: "absolute",
+    top: 10,
+    left: 10,
+    minWidth: 52,
+    paddingVertical: 6,
+    paddingHorizontal: 8,
+    borderRadius: 12,
+    backgroundColor: "rgba(14, 11, 22, 0.85)",
     alignItems: "center",
   },
-  textContent: {
-    flex: 1,
+  dateDay: {
+    color: COLORS.onImage,
+    fontSize: 20,
+    fontWeight: "800",
+    lineHeight: 22,
   },
-  checkContainer: {
-    paddingRight: 10,
-  },
-  postTitle: {
-    fontSize: 16,
-    fontWeight: "bold",
-    color: "#FFFFFF",
-  },
-  postBody: {
+  dateMonth: {
+    color: COLORS.accent,
     fontSize: 12,
-    color: "#E0E0E0",
-    marginTop: 5,
+    fontWeight: "700",
+    letterSpacing: 1,
   },
-  postTime: {
-    fontSize: 12,
-    color: "#E0E0E0",
-    marginTop: 5,
+  interestButton: {
+    position: "absolute",
+    top: 10,
+    right: 10,
+    width: 46,
+    height: 46,
+    borderRadius: 23,
+    backgroundColor: "rgba(0, 0, 0, 0.45)",
+    alignItems: "center",
+    justifyContent: "center",
   },
-  statusText: {
+  interestTouch: {
+    width: 46,
+    height: 46,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  info: {
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    gap: 6,
+  },
+  title: {
+    color: COLORS.text,
     fontSize: 18,
-    color: "#FFFFFF",
-    textAlign: "center",
-    marginTop: 20,
+    fontWeight: "800",
+    marginBottom: 2,
   },
-});
+  infoRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  infoText: {
+    flex: 1,
+    color: COLORS.textSecondary,
+    fontSize: 14,
+  },
+
+  // Empty / loading / error
+  message: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 60,
+    paddingHorizontal: 32,
+  },
+  messageTitle: {
+    color: COLORS.text,
+    fontSize: 18,
+    fontWeight: "700",
+    marginTop: 14,
+  },
+  messageText: {
+    color: COLORS.textSecondary,
+    fontSize: 14,
+    textAlign: "center",
+    marginTop: 6,
+  },
+  retryButton: {
+    marginTop: 16,
+    backgroundColor: COLORS.surface,
+    borderRadius: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 20,
+  },
+  retryButtonText: {
+    color: COLORS.text,
+    fontSize: 14,
+    fontWeight: "600",
+  },
+}));

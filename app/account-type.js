@@ -3,6 +3,7 @@ import { LinearGradient } from "expo-linear-gradient";
 import { useRouter } from "expo-router";
 import { StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { useI18n } from "../lib/i18n";
 
 export const options = {
   headerShown: false,
@@ -10,20 +11,19 @@ export const options = {
 
 export default function AccountType() {
   const router = useRouter();
+  const { t } = useI18n();
 
   return (
     <LinearGradient
-      colors={["#BB86FC", "#6200EE", "#8B008B", "#1E1E1E"]}
+      colors={["#A78BFA", "#5B21B6", "#3B0764", "#1A1626"]}
       style={styles.gradient}
       start={{ x: 0, y: 0 }}
       end={{ x: 1, y: 1 }}
     >
       <SafeAreaView style={styles.container}>
         <View style={styles.formContainer}>
-          <Text style={styles.headerTitle}>Choose Your Account Type</Text>
-          <Text style={styles.headerBody}>
-            Select the account that suits you best!
-          </Text>
+          <Text style={styles.headerTitle}>{t("auth.chooseAccountType")}</Text>
+          <Text style={styles.headerBody}>{t("auth.chooseAccountSubtitle")}</Text>
           <TouchableOpacity
             style={[styles.button, styles.personalButton]}
             onPress={() => router.push("/user-account-add")}
@@ -34,7 +34,7 @@ export default function AccountType() {
               color="#FFFFFF"
               style={styles.buttonIcon}
             />
-            <Text style={styles.buttonText}>Personal Account</Text>
+            <Text style={styles.buttonText}>{t("auth.personalAccount")}</Text>
           </TouchableOpacity>
           <TouchableOpacity
             style={[styles.button, styles.venueButton]}
@@ -46,7 +46,7 @@ export default function AccountType() {
               color="#FFFFFF"
               style={styles.buttonIcon}
             />
-            <Text style={styles.buttonText}>Venue Account</Text>
+            <Text style={styles.buttonText}>{t("auth.venueAccount")}</Text>
           </TouchableOpacity>
         </View>
       </SafeAreaView>
@@ -78,7 +78,7 @@ const styles = StyleSheet.create({
   },
   headerBody: {
     fontSize: 18,
-    color: "#E0E0E0",
+    color: "#DDD8EA",
     textShadowColor: "rgba(0, 0, 0, 0.75)",
     textShadowOffset: { width: -1, height: 1 },
     textShadowRadius: 2,
@@ -88,10 +88,10 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#1E1E1E",
+    backgroundColor: "#1A1626",
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: "#333333",
+    borderColor: "#2E2742",
     padding: 20,
     marginBottom: 20,
     width: "95%",
@@ -102,10 +102,10 @@ const styles = StyleSheet.create({
     elevation: 5,
   },
   personalButton: {
-    backgroundColor: "#BB86FC",
+    backgroundColor: "#A78BFA",
   },
   venueButton: {
-    backgroundColor: "#FF69B4",
+    backgroundColor: "#F472B6",
   },
   buttonIcon: {
     marginRight: 10,
