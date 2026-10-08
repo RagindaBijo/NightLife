@@ -1,11 +1,12 @@
 import { DarkTheme, DefaultTheme, Stack, ThemeProvider } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { useMemo } from 'react';
-import { I18nProvider } from '../lib/i18n';
+import { I18nProvider, useI18n } from '../lib/i18n';
 import { AppThemeProvider, useTheme } from '../lib/theme-context';
 
 function ThemedStack() {
   const { scheme, colors } = useTheme();
+  const { t } = useI18n();
 
   // Navigation colours (screen backgrounds during transitions, headers)
   const navigationTheme = useMemo(() => {
@@ -33,6 +34,9 @@ function ThemedStack() {
         <Stack.Screen name="venue-account-add" options={{ headerShown: false }} />
         <Stack.Screen name="account-type" options={{ headerShown: false }} />
         <Stack.Screen name="protected" options={{ headerShown: false }} />
+        {/* Readable before signing up (linked from the Terms checkbox) */}
+        <Stack.Screen name="terms" options={{ title: t('settings.termsOfUse') }} />
+        <Stack.Screen name="privacy" options={{ title: t('settings.privacyPolicy') }} />
       </Stack>
     </ThemeProvider>
   );

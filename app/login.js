@@ -1,219 +1,264 @@
-import { Ionicons } from "@expo/vector-icons";
-import { LinearGradient } from "expo-linear-gradient";
-import { Link, useRouter } from "expo-router";
-import { useState } from "react";
-import {
-  Keyboard,
-  StyleSheet,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  TouchableWithoutFeedback,
-  View,
-} from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { MaterialIcons } from "@expo/vector-icons";
+import { Image } from "expo-image";
+import { useRouter } from "expo-router";
+import { useRef, useState } from "react";
+import { Pressable, StyleSheet, Text, View } from "react-native";
+import AuthInput from "../components/auth/AuthInput";
+import AuthScreen from "../components/auth/AuthScreen";
+import { AUTH_COLORS as C } from "../components/auth/authColors";
+import GradientButton from "../components/auth/GradientButton";
 import { api, saveSession } from "../lib/api";
+import { APP_INFO } from "../lib/appInfo";
 import { useI18n } from "../lib/i18n";
+import { normalizeEmail } from "../lib/validation";
 
 export const options = {
   headerShown: false,
 };
 
+const LOGO = require("../assets/images/logo-glow.png");
+
+// What the app is about (fills the space under the logo)
+const HIGHLIGHTS = [
+  { icon: "place", key: "highlightVenues" },
+  { icon: "event", key: "highlightEvents" },
+  { icon: "forum", key: "highlightPeople" },
+];
+
 export default function Login() {
-  const [showPassword, setShowPassword] = useState(false);
+  const router = useRouter();
+  const { t } = useI18n();
+  const passwordRef = useRef(null);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
-  const router = useRouter();
-  const { t } = useI18n();
+  const [loading, setLoading] = useState(false);
 
-  const togglePasswordVisibility = () => setShowPassword(!showPassword);
+  const canSubmit = email.trim().length > 0 && password.length > 0 && !loading;
 
   const handleLogin = async () => {
+    if (!canSubmit) return;
+    setLoading(true);
+    setError("");
     try {
       const data = await api("/api/login", {
         method: "POST",
-        body: { email, password },
+        body: { email: normalizeEmail(email), password },
         auth: false,
       });
       await saveSession(data);
       router.replace("/protected/home");
     } catch (err) {
-      setError(err.status === 0 ? t("auth.networkError") : err.message || t("auth.loginFailed"));
+      setError(
+        err.status === 0
+          ? t("auth.networkError")
+          : err.status === 401
+            ? t("auth.invalidCredentials")
+            : err.message || t("auth.loginFailed"),
+      );
+      setLoading(false);
     }
   };
 
   return (
-    <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
-      <LinearGradient
-        colors={["#A78BFA", "#5B21B6", "#3B0764", "#1A1626"]}
-        style={styles.gradient}
-        start={{ x: 0, y: 0 }}
-        end={{ x: 1, y: 1 }}
-      >
-        <SafeAreaView style={styles.container}>
-          <View style={styles.formContainer}>
-            <Text style={styles.headerTitle}>{t("auth.welcomeBack")}</Text>
-            <Text style={styles.headerBody}>{t("auth.loginSubtitle")}</Text>
-            <View style={styles.inputContainer}>
-              <TextInput
-                style={styles.input}
-                placeholder={t("auth.email")}
-                placeholderTextColor="#8C85A3"
-                keyboardType="email-address"
-                value={email}
-                onChangeText={setEmail}
-              />
+    <AuthScreen contentStyle={styles.content}>
+      {/* Brand */}
+      <View style={styles.hero}>
+        <Image source={LOGO} style={styles.logo} contentFit="contain" />
+        <Text style={styles.appName}>{APP_INFO.name}</Text>
+        <Text style={styles.tagline}>{t("auth.tagline")}</Text>
+      </View>
+
+      <View style={styles.highlights}>
+        {HIGHLIGHTS.map((item) => (
+          <View key={item.key} style={styles.highlight}>
+            <View style={styles.highlightIcon}>
+              <MaterialIcons name={item.icon} size={20} color={C.accent} />
             </View>
-            <View style={styles.inputContainer}>
-              <TextInput
-                style={styles.input}
-                placeholder={t("auth.password")}
-                placeholderTextColor="#8C85A3"
-                secureTextEntry={!showPassword}
-                value={password}
-                onChangeText={setPassword}
-              />
-              <TouchableOpacity
-                style={styles.eyeIcon}
-                onPress={togglePasswordVisibility}
-              >
-                <Ionicons
-                  name={showPassword ? "eye" : "eye-off"}
-                  size={24}
-                  color="#8C85A3"
-                />
-              </TouchableOpacity>
-            </View>
-            {error ? <Text style={styles.errorText}>{error}</Text> : null}
-            <TouchableOpacity style={styles.button} onPress={handleLogin}>
-              <Text style={styles.buttonText}>{t("auth.logIn")}</Text>
-            </TouchableOpacity>
-            <View style={styles.socialLoginContainer}>
-              <TouchableOpacity
-                style={[styles.socialButton, { backgroundColor: "#FFFFFF" }]}
-              >
-                <Ionicons name="logo-google" size={22} color="#000000" />
-                <Text style={[styles.socialButtonText, { color: "#000000" }]}>
-                  Google
-                </Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.socialButton, { backgroundColor: "#000000" }]}
-              >
-                <Ionicons name="logo-apple" size={22} color="#FFFFFF" />
-                <Text style={[styles.socialButtonText, { color: "#FFFFFF" }]}>
-                  Apple
-                </Text>
-              </TouchableOpacity>
-            </View>
-            <Link href="/account-type" asChild>
-              <TouchableOpacity>
-                <Text style={styles.linkText}>{t("auth.needAccount")}</Text>
-              </TouchableOpacity>
-            </Link>
+            <Text style={styles.highlightText} numberOfLines={2}>
+              {t(`auth.${item.key}`)}
+            </Text>
           </View>
-        </SafeAreaView>
-      </LinearGradient>
-    </TouchableWithoutFeedback>
+        ))}
+      </View>
+
+      {/* Form */}
+      <View style={styles.form}>
+        <Text style={styles.formTitle}>{t("auth.welcomeBack")}</Text>
+        <AuthInput
+          icon="mail-outline"
+          placeholder={t("auth.email")}
+          value={email}
+          onChangeText={setEmail}
+          keyboardType="email-address"
+          autoCapitalize="none"
+          autoCorrect={false}
+          autoComplete="email"
+          textContentType="emailAddress"
+          returnKeyType="next"
+          onSubmitEditing={() => passwordRef.current?.focus()}
+        />
+        <AuthInput
+          ref={passwordRef}
+          icon="lock-outline"
+          placeholder={t("auth.password")}
+          value={password}
+          onChangeText={setPassword}
+          secure
+          autoCapitalize="none"
+          autoComplete="password"
+          textContentType="password"
+          returnKeyType="go"
+          onSubmitEditing={handleLogin}
+        />
+
+        {!!error && (
+          <View style={styles.errorBox}>
+            <MaterialIcons name="error-outline" size={18} color={C.danger} />
+            <Text style={styles.errorText}>{error}</Text>
+          </View>
+        )}
+
+        <GradientButton
+          label={t("auth.logIn")}
+          onPress={handleLogin}
+          disabled={!canSubmit}
+          loading={loading}
+          style={styles.submit}
+        />
+      </View>
+
+      {/* Sign up */}
+      <View style={styles.footer}>
+        <View style={styles.divider}>
+          <View style={styles.dividerLine} />
+          <Text style={styles.dividerText}>{t("auth.newHere")}</Text>
+          <View style={styles.dividerLine} />
+        </View>
+        <Pressable
+          onPress={() => router.push("/account-type")}
+          style={({ pressed }) => [styles.secondaryButton, pressed && styles.pressed]}
+          accessibilityRole="button"
+        >
+          <Text style={styles.secondaryButtonText}>{t("auth.createAccount")}</Text>
+        </Pressable>
+      </View>
+    </AuthScreen>
   );
 }
 
 const styles = StyleSheet.create({
-  gradient: {
-    flex: 1,
-  },
-  container: {
-    flex: 1,
-    padding: 10,
-  },
-  formContainer: {
-    flex: 1,
+  content: {
     justifyContent: "center",
+  },
+  hero: {
     alignItems: "center",
   },
-  headerTitle: {
-    fontSize: 28,
-    fontWeight: "bold",
-    color: "#FFFFFF",
-    textShadowColor: "rgba(0, 0, 0, 0.75)",
-    textShadowOffset: { width: -1, height: 1 },
-    textShadowRadius: 2,
-    marginBottom: 15,
+  logo: {
+    width: 120,
+    height: 120,
   },
-  headerBody: {
-    fontSize: 18,
-    color: "#DDD8EA",
-    textShadowColor: "rgba(0, 0, 0, 0.75)",
-    textShadowOffset: { width: -1, height: 1 },
-    textShadowRadius: 2,
-    marginBottom: 30,
+  appName: {
+    color: C.text,
+    fontSize: 34,
+    fontWeight: "800",
+    letterSpacing: 0.5,
+    marginTop: 4,
   },
-  inputContainer: {
-    backgroundColor: "#1A1626",
-    borderRadius: 8,
+  tagline: {
+    color: C.textSecondary,
+    fontSize: 16,
+    textAlign: "center",
+    marginTop: 6,
+  },
+  highlights: {
+    flexDirection: "row",
+    gap: 10,
+    marginTop: 28,
+  },
+  highlight: {
+    flex: 1,
+    alignItems: "center",
+    gap: 8,
+    paddingVertical: 14,
+    paddingHorizontal: 6,
+    borderRadius: 18,
+    backgroundColor: "rgba(26, 22, 38, 0.7)",
     borderWidth: 1,
-    borderColor: "#2E2742",
-    marginBottom: 10,
-    paddingHorizontal: 10,
-    width: "95%",
+    borderColor: C.border,
+  },
+  highlightIcon: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: C.accentSoft,
+  },
+  highlightText: {
+    color: C.text,
+    fontSize: 12,
+    fontWeight: "600",
+    textAlign: "center",
+  },
+  form: {
+    gap: 12,
+    marginTop: 32,
+  },
+  formTitle: {
+    color: C.text,
+    fontSize: 22,
+    fontWeight: "800",
+    marginBottom: 4,
+  },
+  errorBox: {
     flexDirection: "row",
     alignItems: "center",
-  },
-  input: {
-    flex: 1,
-    height: 48,
-    fontSize: 16,
-    color: "#FFFFFF",
-  },
-  eyeIcon: {
-    padding: 10,
+    gap: 8,
+    padding: 12,
+    borderRadius: 12,
+    backgroundColor: "rgba(248, 113, 113, 0.12)",
   },
   errorText: {
-    fontSize: 16,
-    color: "#F87171",
-    marginBottom: 10,
+    flex: 1,
+    color: C.danger,
+    fontSize: 14,
   },
-  button: {
-    backgroundColor: "#A78BFA",
-    borderRadius: 8,
-    padding: 12,
+  submit: {
+    marginTop: 4,
+  },
+  footer: {
+    marginTop: 28,
+    gap: 16,
+  },
+  divider: {
+    flexDirection: "row",
     alignItems: "center",
-    marginTop: 10,
-    width: "95%",
+    gap: 12,
   },
-  buttonText: {
-    fontSize: 16,
-    fontWeight: "bold",
-    color: "#FFFFFF",
+  dividerLine: {
+    flex: 1,
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: C.border,
   },
-  socialLoginContainer: {
-    marginTop: 20,
-    gap: 10,
-    width: "95%",
-    flexDirection: "row",
-    justifyContent: "space-between",
+  dividerText: {
+    color: C.textSecondary,
+    fontSize: 13,
   },
-  socialButton: {
-    flexDirection: "row",
+  secondaryButton: {
+    height: 54,
+    borderRadius: 16,
+    borderWidth: 1.5,
+    borderColor: C.accent,
     alignItems: "center",
     justifyContent: "center",
-    borderRadius: 8,
-    padding: 12,
-    borderWidth: 1,
-    borderColor: "#2E2742",
-    flex: 1,
-    marginHorizontal: 5,
   },
-  socialButtonText: {
-    fontSize: 16,
-    fontWeight: "bold",
-    marginLeft: 5,
+  secondaryButtonText: {
+    color: C.accent,
+    fontSize: 17,
+    fontWeight: "700",
   },
-  linkText: {
-    fontSize: 16,
-    color: "#F472B6",
-    marginTop: 15,
-    textDecorationLine: "underline",
+  pressed: {
+    opacity: 0.6,
   },
 });

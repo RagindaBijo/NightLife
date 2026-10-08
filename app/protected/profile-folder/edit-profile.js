@@ -264,7 +264,11 @@ export default function EditProfile() {
         t("common.saveError"),
         err.status === 0
           ? t("editProfile.saveNetworkError")
-          : err.message || t("editProfile.saveFailed"),
+          : err.code === "username_taken"
+            ? t("auth.usernameTaken")
+            : err.code === "invalid_username"
+              ? t("auth.usernameRules")
+              : err.message || t("editProfile.saveFailed"),
       );
     } finally {
       setSaving(false);

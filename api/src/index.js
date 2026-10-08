@@ -172,6 +172,55 @@ async function verifyPassword(password, stored) {
 }
 
 // ────────────────────────────────────────────────
+// Sign-up validation (the app checks the same rules while typing)
+// ────────────────────────────────────────────────
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+// 3–30 letters, numbers, dots or underscores; compared case-insensitively
+const USERNAME_RE = /^[A-Za-z0-9._]{3,30}$/;
+
+const normalizeEmail = (email) =>
+  typeof email === "string" ? email.trim().toLowerCase() : "";
+
+/** Returns the missing password rules (empty array = strong enough). */
+function passwordProblems(password) {
+  if (typeof password !== "string") return ["length"];
+  const problems = [];
+  if (password.length < 9) problems.push("length");
+  if (!/[A-Z]/.test(password)) problems.push("uppercase");
+  if (!/[0-9]/.test(password)) problems.push("number");
+  if (!/[^A-Za-z0-9]/.test(password)) problems.push("symbol");
+  return problems;
+}
+
+/** True if a user or venue already uses this username (any letter case). */
+async function isUsernameTaken(db, username, exceptId = null) {
+  const row = await db
+    .prepare(
+      `SELECT id FROM user_profile WHERE username = ? COLLATE NOCASE AND id IS NOT ?
+       UNION ALL
+       SELECT id FROM venue_profile WHERE username = ? COLLATE NOCASE AND id IS NOT ?
+       LIMIT 1`,
+    )
+    .bind(username, exceptId, username, exceptId)
+    .first();
+  return !!row;
+}
+
+/**
+ * Checks a username for profile updates. Throws HttpError with a code the
+ * app can translate.
+ */
+async function checkUsername(db, username, exceptId = null) {
+  if (typeof username !== "string" || !USERNAME_RE.test(username)) {
+    throw new HttpError(400, "Invalid username", "invalid_username");
+  }
+  if (await isUsernameTaken(db, username, exceptId)) {
+    throw new HttpError(409, "Username is already taken", "username_taken");
+  }
+}
+
+// ────────────────────────────────────────────────
 // Image helpers
 // ────────────────────────────────────────────────
 
@@ -309,9 +358,11 @@ function json(data, status = 200) {
  * response by the top-level handler.
  */
 class HttpError extends Error {
-  constructor(status, message) {
+  // `code` is a stable id the app maps to a translated message
+  constructor(status, message, code) {
     super(message);
     this.status = status;
+    this.code = code;
   }
 }
 
@@ -525,53 +576,111 @@ export default {
       // AUTH ROUTES
       // ════════════════════════════════════════════
 
-      // POST /api/register  – Create new account
+      // GET /api/username-available?username=…  – Live check while signing up
+      if (route("GET", /^\/api\/username-available$/)) {
+        const username = (searchParams.get("username") || "").trim();
+        if (!USERNAME_RE.test(username)) {
+          return json({ available: false, reason: "invalid_username" });
+        }
+        const taken = await isUsernameTaken(env.DB, username);
+        return json({ available: !taken, reason: taken ? "username_taken" : null });
+      }
+
+      // POST /api/register  – Create account + profile in one step
+      // Body: { email, password, user_type, username, accepted_terms,
+      //         first_name, last_name (users) | title (venues) }
       if (route("POST", /^\/api\/register$/)) {
-        const { email, password, user_type } = await readJson(request);
+        const body = await readJson(request);
+        const userType = body.user_type;
+        const email = normalizeEmail(body.email);
+        const username = typeof body.username === "string" ? body.username.trim() : "";
+        const text = (value, max) =>
+          typeof value === "string" ? value.trim().slice(0, max) : "";
+        const firstName = text(body.first_name, 50);
+        const lastName = text(body.last_name, 50);
+        const title = text(body.title, 80);
 
-        if (!email || !password || !user_type) {
-          return json({ error: "Missing required fields" }, 400);
+        if (userType !== 1 && userType !== 2) {
+          throw new HttpError(400, "Invalid user type", "invalid_user_type");
         }
-
-        // user_type must be 1 (user) or 2 (venue)
-        if (user_type !== 1 && user_type !== 2) {
-          return json({ error: "Invalid user type" }, 400);
+        if (body.accepted_terms !== true) {
+          throw new HttpError(400, "You must accept the Terms of Use", "terms_required");
         }
+        if (!EMAIL_RE.test(email) || email.length > 254) {
+          throw new HttpError(400, "Invalid email", "invalid_email");
+        }
+        if (passwordProblems(body.password).length > 0) {
+          throw new HttpError(400, "Password is too weak", "weak_password");
+        }
+        if (userType === 1 && (!firstName || !lastName)) {
+          throw new HttpError(400, "Missing required fields", "missing_fields");
+        }
+        if (userType === 2 && !title) {
+          throw new HttpError(400, "Missing required fields", "missing_fields");
+        }
+        await checkUsername(env.DB, username);
 
-        // Check if email already exists
-        const emailCheck = await env.DB.prepare(
-          "SELECT id FROM login_data WHERE email = ?",
+        const emailTaken = await env.DB.prepare(
+          "SELECT id FROM login_data WHERE lower(email) = ?",
         )
           .bind(email)
           .first();
+        if (emailTaken) {
+          throw new HttpError(409, "Email already exists", "email_taken");
+        }
 
-        if (emailCheck) return json({ error: "Email already exists" }, 400);
+        // One transaction: the login row (its profile row is created by a DB
+        // trigger) and the profile details. If any part fails, nothing is saved.
+        const now = new Date().toISOString();
+        const passwordHash = await hashPassword(body.password);
+        const profileUpdate =
+          userType === 1
+            ? env.DB.prepare(
+                `UPDATE user_profile SET username = ?, first_name = ?, last_name = ?, update_date = ?
+                 WHERE id = (SELECT id FROM login_data WHERE email = ?)`,
+              ).bind(username, firstName, lastName, now, email)
+            : env.DB.prepare(
+                `UPDATE venue_profile SET username = ?, title = ?, update_date = ?
+                 WHERE id = (SELECT id FROM login_data WHERE email = ?)`,
+              ).bind(username, title, now, email);
 
-        // Insert new login record with a hashed password
-        // (the profile row is created by a DB trigger)
-        const passwordHash = await hashPassword(password);
-        const result = await env.DB.prepare(
-          "INSERT INTO login_data (email, password, user_type, create_date) VALUES (?, ?, ?, ?)",
-        )
-          .bind(email, passwordHash, user_type, new Date().toISOString())
-          .run();
+        let inserted;
+        try {
+          [inserted] = await env.DB.batch([
+            env.DB.prepare(
+              `INSERT INTO login_data (email, password, user_type, create_date, terms_accepted_at)
+               VALUES (?, ?, ?, ?, ?)`,
+            ).bind(email, passwordHash, userType, now, now),
+            profileUpdate,
+          ]);
+        } catch (err) {
+          // Two sign-ups racing for the same email / username hit the unique indexes
+          if (/UNIQUE/i.test(String(err?.message))) {
+            const code = /email/i.test(err.message) ? "email_taken" : "username_taken";
+            throw new HttpError(409, "Already taken", code);
+          }
+          throw err;
+        }
 
-        const userId = result.meta.last_row_id;
-        const token = await generateToken(userId, user_type, JWT_SECRET);
+        const userId = inserted.meta.last_row_id;
+        const token = await generateToken(userId, userType, JWT_SECRET);
 
-        return json({ token, userId, userType: user_type });
+        return json({ token, userId, userType });
       }
 
       // POST /api/login  – Authenticate and return JWT
       if (route("POST", /^\/api\/login$/)) {
-        const { email, password } = await readJson(request);
+        const body = await readJson(request);
+        const email = normalizeEmail(body.email);
+        const password = body.password;
 
         if (!email || !password) {
           return json({ error: "Missing required fields" }, 400);
         }
 
+        // Emails are stored lower-case now; lower() also matches older accounts
         const account = await env.DB.prepare(
-          "SELECT id, password, user_type FROM login_data WHERE email = ?",
+          "SELECT id, password, user_type FROM login_data WHERE lower(email) = ?",
         )
           .bind(email)
           .first();
@@ -630,6 +739,9 @@ export default {
         const values = [];
 
         if (password) {
+          if (passwordProblems(password).length > 0) {
+            throw new HttpError(400, "Password is too weak", "weak_password");
+          }
           updates.push("password = ?");
           values.push(await hashPassword(password));
         }
@@ -738,8 +850,10 @@ export default {
         }
 
         if ("username" in body) {
+          const username = String(body.username ?? "").trim();
+          await checkUsername(env.DB, username, userId); // unique, valid format
           updates.push("username = ?");
-          values.push(body.username);
+          values.push(username);
         }
         if ("first_name" in body) {
           updates.push("first_name = ?");
@@ -958,8 +1072,10 @@ export default {
         }
 
         if ("username" in body) {
+          const username = String(body.username ?? "").trim();
+          await checkUsername(env.DB, username, userId); // unique, valid format
           updates.push("username = ?");
-          values.push(body.username);
+          values.push(username);
         }
         if ("title" in body) {
           updates.push("title = ?");
@@ -1547,7 +1663,10 @@ export default {
       return json({ error: "Not found" }, 404);
     } catch (err) {
       if (err instanceof HttpError) {
-        return json({ error: err.message }, err.status);
+        return json(
+          err.code ? { error: err.message, code: err.code } : { error: err.message },
+          err.status,
+        );
       }
       console.error(`Unhandled error on ${method} ${pathname}:`, err);
       return json({ error: "Server error" }, 500);
