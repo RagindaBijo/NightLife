@@ -1,0 +1,23 @@
+# Night-Life API – Cloudflare Worker
+# Deploy:       npx wrangler deploy
+# Live logs:    npx wrangler tail
+# Secrets (never put them in this file):  npx wrangler secret put JWT_SECRET
+
+name = "night-life-api"
+main = "src/index.js"
+# Same as the version that was deployed from the dashboard, so behaviour doesn't change
+compatibility_date = "2025-08-30"
+compatibility_flags = ["nodejs_compat"]
+
+[observability]
+enabled = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "night_life_app"
+database_id = "89309374-3d0f-4255-9605-592968ede8ed"
+migrations_dir = "migrations"
+
+[[r2_buckets]]
+binding = "R2"
+bucket_name = "night-life-images"
