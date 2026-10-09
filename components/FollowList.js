@@ -4,6 +4,7 @@ import { useFocusEffect, useRouter } from "expo-router";
 import { useCallback, useState } from "react";
 import { ActivityIndicator, Alert, FlatList, Pressable, RefreshControl, Text, View } from "react-native";
 import { api, getSession } from "../lib/api";
+import { followLabelKey, pressFollow } from "../lib/follow";
 import { useI18n } from "../lib/i18n";
 import { openProfile } from "../lib/openProfile";
 import { makeStyles, useTheme } from "../lib/theme-context";
@@ -52,15 +53,18 @@ export default function FollowList({ kind, userId }) {
     setRefreshing(false);
   };
 
-  // Optimistic follow / unfollow, rolled back if the server refuses
+  // Follow (a request until they accept), follow back (asks first), unfollow,
+  // or take a request back
   const toggleFollow = async (person) => {
-    const update = (isFollowing) =>
-      setPeople((prev) => prev.map((p) => (p.id === person.id ? { ...p, is_following: isFollowing } : p)));
-    update(!person.is_following);
     try {
-      await api(`/api/users/${person.id}/follow`, { method: person.is_following ? "DELETE" : "PUT" });
+      const result = await pressFollow(person);
+      if (!result) return;
+      setPeople((prev) =>
+        prev.map((p) =>
+          p.id === person.id ? { ...p, is_following: result.following, follow_status: result.status } : p,
+        ),
+      );
     } catch (err) {
-      update(person.is_following);
       Alert.alert(t("follow.error"), err.message);
     }
   };
@@ -144,17 +148,13 @@ export default function FollowList({ kind, userId }) {
                 hitSlop={6}
                 style={({ pressed }) => [
                   styles.followButton,
-                  item.is_following ? styles.followingButton : styles.followPrimary,
+                  item.follow_status !== "none" ? styles.followingButton : styles.followPrimary,
                   pressed && styles.pressed,
                 ]}
                 accessibilityRole="button"
               >
-                <Text style={[styles.followText, !item.is_following && styles.followTextPrimary]}>
-                  {item.is_following
-                    ? t("userProfile.following")
-                    : kind === "followers" && mine
-                      ? t("follow.followBack")
-                      : t("userProfile.follow")}
+                <Text style={[styles.followText, item.follow_status === "none" && styles.followTextPrimary]}>
+                  {t(followLabelKey(item))}
                 </Text>
               </Pressable>
             )}

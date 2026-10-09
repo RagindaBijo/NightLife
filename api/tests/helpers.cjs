@@ -25,11 +25,10 @@ function wrangler(args) {
   }).toString();
 }
 
-/** Empty database with the current schema and every migration applied. */
+/** Empty database built from the migrations (0001 creates every table). */
 function resetDatabase() {
   // Windows can hold the database file for a moment after the server stops
   fs.rmSync(STATE_DIR, { recursive: true, force: true, maxRetries: 20, retryDelay: 500 });
-  wrangler(`d1 execute night_life_app --local --persist-to "${STATE_DIR}" --file=schema.sql`);
   wrangler(`d1 migrations apply night_life_app --local --persist-to "${STATE_DIR}"`);
 }
 
@@ -126,10 +125,13 @@ function createContext() {
   };
 
   /**
-   * Registers a personal account. By default it gets a profile photo too, so the
-   * profile is complete (visible, can post and chat). Returns { token, userId, username, email }.
+   * Registers a personal account. By default it also gets a profile photo and
+   * 3 music styles + 3 kinds of places, so the profile is complete (visible, can post and chat). Returns { token, userId, username, email }.
    */
-  const registerUser = async (name, { birth_date = "1995-01-01", complete = true, ...extra } = {}) => {
+  const registerUser = async (
+    name,
+    { birth_date = "1995-01-01", complete = true, music = ["techno", "house", "jazz"], venue_types = ["nightclub", "bar", "rooftop"], ...extra } = {},
+  ) => {
     const username = `${name}_${runId}`;
     const email = `${name}.${runId}@test.local`;
     const res = await call("/api/register", {
@@ -150,7 +152,11 @@ function createContext() {
     const account = { ...res.data, username, email };
     if (complete) {
       const key = await uploadImage(account.token, "user");
-      await call(`/api/user/${account.userId}`, { method: "PUT", token: account.token, body: { profile_photo: key } });
+      await call(`/api/user/${account.userId}`, {
+        method: "PUT",
+        token: account.token,
+        body: { profile_photo: key, music, venue_types },
+      });
     }
     return account;
   };

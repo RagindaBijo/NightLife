@@ -17,8 +17,8 @@ npm test -- social    # only suites whose file name contains "social"
 | `social.test.cjs` | 18+ gate, Discover, matches, chat requests, chats, live messages, expiry, unread badge |
 | `events.test.cjs` | Event start times, upcoming lists, going counts, venue totals |
 
-How it works: `run.cjs` rebuilds the test database from `schema.sql` plus every
-migration in `migrations/`, starts `wrangler dev` on it, runs the suite, and stops
+How it works: `run.cjs` rebuilds the test database from the migrations in
+`migrations/` (0001 creates every table), starts `wrangler dev` on it, runs the suite, and stops
 the server. Helpers for calling the API, uploading images and creating test
 accounts are in `helpers.cjs`.
 

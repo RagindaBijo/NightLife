@@ -25,6 +25,8 @@ const { resetDatabase, startServer, createContext } = require("./helpers.cjs");
     } catch (err) {
       ctx.results.failed += 1;
       console.log(`  FAIL crashed: ${err.stack || err.message}`);
+      // The local server's own output usually explains a crash
+      console.log(server.log().split(/\r?\n/).slice(-25).join("\n"));
     } finally {
       await server.stop();
     }

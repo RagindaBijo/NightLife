@@ -2,10 +2,16 @@ import {
   HttpError,
   IMAGE_DOMAIN,
   COMPLETE_PROFILE_SQL,
+  MUSIC_GENRES,
+  NOTIFICATIONS_SQL,
   NOT_BLOCKED_SQL,
+  PLACE_TYPES,
   ageFrom,
-  isProfileComplete,
+  cleanPhotoRatio,
+  cleanPreferences,
+  followStatus,
   isBlockedEitherWay,
+  notificationBinds,
   json,
   limitText,
   parseId,
@@ -797,7 +803,10 @@ export default {
         // Explicit columns – never return email or password
         const profile = await env.DB.prepare(
           `SELECT id, username, user_type, first_name, last_name, profile_photo,
-                  ticket_ids, bio_text, is_hidden, create_date, update_date
+                  ticket_ids, bio_text, is_hidden, create_date, update_date,
+                  ${COMPLETE_PROFILE_SQL("user_profile")} AS complete,
+                  (SELECT GROUP_CONCAT(genre) FROM user_music WHERE user_id = user_profile.id) AS music,
+                  (SELECT GROUP_CONCAT(type) FROM user_venue_types WHERE user_id = user_profile.id) AS venue_types
            FROM user_profile WHERE id = ?`,
         )
           .bind(id)
@@ -805,7 +814,7 @@ export default {
 
         if (!profile) return json({ error: "Not found" }, 404);
         // Until photo, names and username are set, nobody else can see the profile
-        if (id !== user.userId && !isProfileComplete(profile)) {
+        if (id !== user.userId && !profile.complete) {
           return json({ error: "Not found" }, 404);
         }
 
@@ -824,12 +833,15 @@ export default {
              (SELECT COUNT(*) FROM follows WHERE following_id = ?) AS followers_count,
              (SELECT COUNT(*) FROM follows WHERE follower_id = ?)  AS following_count,
              (SELECT COUNT(*) FROM posts   WHERE user_id = ?)      AS posts_count,
-             EXISTS (SELECT 1 FROM follows WHERE follower_id = ? AND following_id = ?) AS is_following`,
+             EXISTS (SELECT 1 FROM follows WHERE follower_id = ? AND following_id = ?) AS is_following,
+             EXISTS (SELECT 1 FROM follow_requests WHERE requester_id = ? AND target_id = ?) AS is_requested,
+             EXISTS (SELECT 1 FROM follows WHERE follower_id = ? AND following_id = ?) AS follows_you,
+             EXISTS (SELECT 1 FROM follow_requests WHERE requester_id = ? AND target_id = ?) AS requested_you`,
         )
-          .bind(id, id, id, user.userId, id)
+          .bind(id, id, id, user.userId, id, user.userId, id, id, user.userId, id, user.userId)
           .first();
 
-        const { ticket_ids, is_hidden, ...publicProfile } = profile;
+        const { ticket_ids, is_hidden, complete, music, venue_types, ...publicProfile } = profile;
         const result = {
           ...publicProfile,
           profile_photo: toImageUrl(profile.profile_photo),
@@ -837,7 +849,13 @@ export default {
           following_count: counts.following_count,
           posts_count: counts.posts_count,
           is_following: !!counts.is_following,
+          // "following" | "requested" (waiting for them to accept) | "none"
+          follow_status: followStatus(counts.is_following, counts.is_requested),
+          follows_you: !!counts.follows_you, // → "Follow back"
+          requested_you: !!counts.requested_you, // they asked to follow you
           is_blocked: !!block.blocked_by_me,
+          music: splitList(music),
+          venue_types: splitList(venue_types),
         };
 
         // Favorites, interests and tickets are private
@@ -854,7 +872,7 @@ export default {
           result.interested_ids = interests.results.map((row) => row.event_id);
           result.ticket_ids = splitList(ticket_ids);
           result.is_hidden = !!is_hidden;
-          result.profile_complete = isProfileComplete(profile);
+          result.profile_complete = !!complete;
         } else {
           Object.assign(result, await chatStatusFor(env.DB, user.userId, id));
         }
@@ -911,6 +929,11 @@ export default {
           updates.push("bio_text = ?");
           values.push(limitText(body.bio_text, 300, "bio_text"));
         }
+        // Music styles and kinds of places (3–10 each), saved below in one batch
+        const music = "music" in body ? cleanPreferences(body.music, MUSIC_GENRES, "music") : null;
+        const venueTypes =
+          "venue_types" in body ? cleanPreferences(body.venue_types, PLACE_TYPES, "venue types") : null;
+
         // Hidden = not shown in Discover or people search
         if ("is_hidden" in body) {
           if (typeof body.is_hidden !== "boolean") {
@@ -920,16 +943,32 @@ export default {
           values.push(body.is_hidden ? 1 : 0);
         }
 
-        if (updates.length === 0)
+        if (updates.length === 0 && !music && !venueTypes)
           return json({ error: "No fields to update" }, 400);
 
         values.push(new Date().toISOString(), userId); // update_date + WHERE id
 
-        const result = await env.DB.prepare(
-          `UPDATE user_profile SET ${updates.join(", ")}, update_date = ? WHERE id = ?`,
-        )
-          .bind(...values)
-          .run();
+        const [result] = await env.DB.batch([
+          env.DB.prepare(
+            `UPDATE user_profile SET ${[...updates, "update_date = ?"].join(", ")} WHERE id = ?`,
+          ).bind(...values),
+          ...(music
+            ? [
+                env.DB.prepare("DELETE FROM user_music WHERE user_id = ?").bind(userId),
+                ...music.map((genre) =>
+                  env.DB.prepare("INSERT INTO user_music (user_id, genre) VALUES (?, ?)").bind(userId, genre),
+                ),
+              ]
+            : []),
+          ...(venueTypes
+            ? [
+                env.DB.prepare("DELETE FROM user_venue_types WHERE user_id = ?").bind(userId),
+                ...venueTypes.map((type) =>
+                  env.DB.prepare("INSERT INTO user_venue_types (user_id, type) VALUES (?, ?)").bind(userId, type),
+                ),
+              ]
+            : []),
+        ]);
 
         if (result.meta.changes === 0)
           return json({ error: "User profile not found" }, 404);
@@ -979,8 +1018,13 @@ export default {
           env.DB.prepare(
             "DELETE FROM venue_views WHERE viewer_id = ? OR venue_id = ?",
           ).bind(userId, userId),
+          env.DB.prepare("DELETE FROM user_music WHERE user_id = ?").bind(userId),
+          env.DB.prepare("DELETE FROM user_venue_types WHERE user_id = ?").bind(userId),
           env.DB.prepare(
             "DELETE FROM follows WHERE follower_id = ? OR following_id = ?",
+          ).bind(userId, userId),
+          env.DB.prepare(
+            "DELETE FROM follow_requests WHERE requester_id = ? OR target_id = ?",
           ).bind(userId, userId),
           env.DB.prepare(
             "DELETE FROM venue_ratings WHERE user_id = ? OR venue_id = ?",
@@ -1086,6 +1130,9 @@ export default {
             env.DB.prepare(
               "DELETE FROM follows WHERE (follower_id = ? AND following_id = ?) OR (follower_id = ? AND following_id = ?)",
             ).bind(user.userId, targetId, targetId, user.userId),
+            env.DB.prepare(
+              "DELETE FROM follow_requests WHERE (requester_id = ? AND target_id = ?) OR (requester_id = ? AND target_id = ?)",
+            ).bind(user.userId, targetId, targetId, user.userId),
             ...endConnectionStatements(env.DB, user.userId, targetId),
           ]);
         } else {
@@ -1179,7 +1226,11 @@ export default {
                   up.last_name,
                   up.profile_photo,
                   EXISTS (SELECT 1 FROM follows mine
-                          WHERE mine.follower_id = ? AND mine.following_id = f.${personColumn}) AS is_following
+                          WHERE mine.follower_id = ? AND mine.following_id = f.${personColumn}) AS is_following,
+                  EXISTS (SELECT 1 FROM follow_requests r
+                          WHERE r.requester_id = ? AND r.target_id = f.${personColumn}) AS is_requested,
+                  EXISTS (SELECT 1 FROM follows back
+                          WHERE back.follower_id = f.${personColumn} AND back.following_id = ?) AS follows_you
            FROM follows f
            JOIN login_data ld ON ld.id = f.${personColumn}
            LEFT JOIN user_profile up ON up.id = f.${personColumn}
@@ -1190,20 +1241,26 @@ export default {
            ORDER BY f.create_date DESC, f.rowid DESC
            LIMIT 500`,
         )
-          .bind(user.userId, targetId, user.userId, user.userId)
+          .bind(user.userId, user.userId, user.userId, targetId, user.userId, user.userId)
           .all();
 
         return json(
-          results.map((row) => ({
+          results.map(({ is_requested, ...row }) => ({
             ...row,
             profile_photo: toImageUrl(row.profile_photo),
             is_following: !!row.is_following,
+            follow_status: followStatus(row.is_following, is_requested),
+            follows_you: !!row.follows_you,
             is_me: row.id === user.userId,
           })),
         );
       }
 
-      // PUT / DELETE /api/users/:id/follow  – Follow / unfollow a user
+      // PUT /api/users/:id/follow  – Follow. A personal account has to accept first
+      //   (a request), except when they already follow you ("Follow back"). Venues
+      //   are followed straight away.
+      // DELETE /api/users/:id/follow – Unfollow, or take back a waiting request
+      // Answer: { status: "following"|"requested"|"none", following, followers_count }
       if ((match = toggleRoute(/^\/api\/users\/([^/]+)\/follow$/))) {
         requireUser(user);
         const targetId = parseId(match[1]);
@@ -1212,9 +1269,11 @@ export default {
           return json({ error: "You cannot follow yourself" }, 400);
 
         const target = await env.DB.prepare(
-          "SELECT id FROM login_data WHERE id = ?",
+          `SELECT ld.user_type,
+                  EXISTS (SELECT 1 FROM follows WHERE follower_id = ? AND following_id = ?) AS follows_me
+           FROM login_data ld WHERE ld.id = ?`,
         )
-          .bind(targetId)
+          .bind(targetId, user.userId, targetId)
           .first();
 
         if (!target) return json({ error: "User not found" }, 404);
@@ -1224,11 +1283,45 @@ export default {
           throw new HttpError(403, "You can't follow this account", "blocked");
         }
 
-        const statement =
-          method === "PUT"
-            ? "INSERT OR IGNORE INTO follows (follower_id, following_id) VALUES (?, ?)"
-            : "DELETE FROM follows WHERE follower_id = ? AND following_id = ?";
-        await env.DB.prepare(statement).bind(user.userId, targetId).run();
+        let status = "none";
+        if (method === "PUT") {
+          const already = await env.DB.prepare(
+            "SELECT 1 FROM follows WHERE follower_id = ? AND following_id = ?",
+          )
+            .bind(user.userId, targetId)
+            .first();
+          if (already || target.user_type === 2 || target.follows_me) {
+            await env.DB.batch([
+              env.DB.prepare("INSERT OR IGNORE INTO follows (follower_id, following_id) VALUES (?, ?)").bind(
+                user.userId,
+                targetId,
+              ),
+              env.DB.prepare("DELETE FROM follow_requests WHERE requester_id = ? AND target_id = ?").bind(
+                user.userId,
+                targetId,
+              ),
+            ]);
+            status = "following";
+          } else {
+            await env.DB.prepare(
+              "INSERT OR IGNORE INTO follow_requests (requester_id, target_id) VALUES (?, ?)",
+            )
+              .bind(user.userId, targetId)
+              .run();
+            status = "requested";
+          }
+        } else {
+          await env.DB.batch([
+            env.DB.prepare("DELETE FROM follows WHERE follower_id = ? AND following_id = ?").bind(
+              user.userId,
+              targetId,
+            ),
+            env.DB.prepare("DELETE FROM follow_requests WHERE requester_id = ? AND target_id = ?").bind(
+              user.userId,
+              targetId,
+            ),
+          ]);
+        }
 
         const { followers_count } = await env.DB.prepare(
           "SELECT COUNT(*) AS followers_count FROM follows WHERE following_id = ?",
@@ -1236,7 +1329,122 @@ export default {
           .bind(targetId)
           .first();
 
-        return json({ following: method === "PUT", followers_count });
+        return json({ status, following: status === "following", followers_count });
+      }
+
+      // PUT /api/follow-requests/:userId  { accept }  – Accept or decline someone's
+      // request to follow you. Answer: { accepted, followers_count, mutual }
+      if ((match = route("PUT", /^\/api\/follow-requests\/([^/]+)$/))) {
+        requireUser(user);
+        await rateLimit(env.WRITE_LIMITER, `write:${user.userId}`);
+        const requesterId = parseId(match[1]);
+        const body = await readJson(request);
+        const pending = await env.DB.prepare(
+          "SELECT 1 FROM follow_requests WHERE requester_id = ? AND target_id = ?",
+        )
+          .bind(requesterId, user.userId)
+          .first();
+        if (!pending) throw new HttpError(404, "Request not found", "request_not_found");
+
+        const accept = body.accept === true;
+        await env.DB.batch([
+          ...(accept
+            ? [
+                env.DB.prepare(
+                  "INSERT OR IGNORE INTO follows (follower_id, following_id, via_request) VALUES (?, ?, 1)",
+                ).bind(requesterId, user.userId),
+              ]
+            : []),
+          env.DB.prepare("DELETE FROM follow_requests WHERE requester_id = ? AND target_id = ?").bind(
+            requesterId,
+            user.userId,
+          ),
+        ]);
+
+        const row = await env.DB.prepare(
+          `SELECT (SELECT COUNT(*) FROM follows WHERE following_id = ?) AS followers_count,
+                  EXISTS (SELECT 1 FROM follows WHERE follower_id = ? AND following_id = ?) AS i_follow`,
+        )
+          .bind(user.userId, user.userId, requesterId)
+          .first();
+        return json({ accepted: accept, followers_count: row.followers_count, mutual: accept && !!row.i_follow });
+      }
+
+      // GET /api/notifications  – Newest first: follow requests, new followers,
+      // accepted requests and likes on your posts (last 100).
+      // Answer: { items: [{ type, date, user, post_id?, post_image?, is_following, unread }], unread }
+      if (route("GET", /^\/api\/notifications$/)) {
+        requireUser(user);
+        const me = await env.DB.prepare("SELECT notifications_seen_at FROM login_data WHERE id = ?")
+          .bind(user.userId)
+          .first();
+        const { results } = await env.DB.prepare(
+          `${NOTIFICATIONS_SQL}
+           SELECT n.type, n.date, n.post_id, n.post_image, n.user_id,
+                  ld.user_type,
+                  COALESCE(up.username, vp.username) AS username,
+                  COALESCE(up.first_name, vp.title) AS first_name,
+                  up.profile_photo,
+                  EXISTS (SELECT 1 FROM follows mine WHERE mine.follower_id = ? AND mine.following_id = n.user_id) AS is_following,
+                  EXISTS (SELECT 1 FROM follow_requests r WHERE r.requester_id = ? AND r.target_id = n.user_id) AS is_requested
+           FROM n
+           JOIN login_data ld ON ld.id = n.user_id
+           LEFT JOIN user_profile up ON up.id = n.user_id
+           LEFT JOIN venue_profile vp ON vp.id = n.user_id
+           WHERE ${NOT_BLOCKED_SQL("n.user_id")}
+             AND (vp.id IS NOT NULL OR ${COMPLETE_PROFILE_SQL("up")})
+           ORDER BY n.date DESC
+           LIMIT 100`,
+        )
+          .bind(...notificationBinds(user.userId), user.userId, user.userId, user.userId, user.userId)
+          .all();
+
+        const seen = me?.notifications_seen_at;
+        const items = results.map((row) => ({
+          type: row.type,
+          date: row.date,
+          post_id: row.post_id ?? undefined,
+          post_image: toImageUrl(row.post_image) || undefined,
+          user: {
+            id: row.user_id,
+            user_type: row.user_type,
+            username: row.username,
+            first_name: row.first_name,
+            profile_photo: toImageUrl(row.profile_photo),
+          },
+          is_following: !!row.is_following,
+          follow_status: followStatus(row.is_following, row.is_requested),
+          unread: !seen || row.date > seen,
+        }));
+        return json({ items, unread: items.filter((item) => item.unread).length });
+      }
+
+      // GET /api/notifications/unread  – { count } for the bell's badge
+      if (route("GET", /^\/api\/notifications\/unread$/)) {
+        requireUser(user);
+        const row = await env.DB.prepare(
+          `${NOTIFICATIONS_SQL}
+           SELECT COUNT(*) AS count
+           FROM n
+           JOIN login_data ld ON ld.id = n.user_id
+           LEFT JOIN user_profile up ON up.id = n.user_id
+           LEFT JOIN venue_profile vp ON vp.id = n.user_id
+           WHERE ${NOT_BLOCKED_SQL("n.user_id")}
+             AND (vp.id IS NOT NULL OR ${COMPLETE_PROFILE_SQL("up")})
+             AND n.date > COALESCE((SELECT notifications_seen_at FROM login_data WHERE id = ?), '')`,
+        )
+          .bind(...notificationBinds(user.userId), user.userId, user.userId, user.userId)
+          .first();
+        return json({ count: row.count });
+      }
+
+      // PUT /api/notifications/seen  – Everything up to now counts as read
+      if (route("PUT", /^\/api\/notifications\/seen$/)) {
+        requireUser(user);
+        await env.DB.prepare("UPDATE login_data SET notifications_seen_at = CURRENT_TIMESTAMP WHERE id = ?")
+          .bind(user.userId)
+          .run();
+        return json({ success: true });
       }
 
       // ════════════════════════════════════════════
@@ -1779,6 +1987,7 @@ export default {
             up.username,
             up.profile_photo AS user_image,
             p.photo_id AS post_image,
+            p.photo_ratio,
             p.post_text AS caption,
             p.location_tag,
             p.create_date AS date,
@@ -1816,6 +2025,7 @@ export default {
         const body = await readJson(request);
         const { user_id, post_text, location_tag } = body;
         const photo_id = toImageKey(body.photo_id);
+        const photo_ratio = cleanPhotoRatio(body.photo_ratio);
 
         if (!user_id || !photo_id) {
           return json(
@@ -1837,11 +2047,11 @@ export default {
         // Personal accounts need photo, names and username before posting
         if (user.userType === 1) {
           const author = await env.DB.prepare(
-            "SELECT username, first_name, last_name, profile_photo FROM user_profile WHERE id = ?",
+            `SELECT ${COMPLETE_PROFILE_SQL("user_profile")} AS complete FROM user_profile WHERE id = ?`,
           )
             .bind(parsedUserId)
             .first();
-          if (!isProfileComplete(author)) {
+          if (!author?.complete) {
             throw new HttpError(403, "Complete your profile first", "profile_incomplete");
           }
         }
@@ -1862,13 +2072,14 @@ export default {
           return json({ error: "Invalid user_id: User not found" }, 400);
 
         const result = await env.DB.prepare(
-          "INSERT INTO posts (user_id, post_text, location_tag, photo_id) VALUES (?, ?, ?, ?)",
+          "INSERT INTO posts (user_id, post_text, location_tag, photo_id, photo_ratio) VALUES (?, ?, ?, ?, ?)",
         )
           .bind(
             parsedUserId,
             limitText(post_text || "", 2200, "post_text"),
             limitText(location_tag || "", 100, "location_tag"),
             photo_id,
+            photo_ratio,
           )
           .run();
 

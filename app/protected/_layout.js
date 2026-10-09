@@ -5,6 +5,7 @@ import { ActivityIndicator, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { getSession } from "../../lib/api";
 import { useI18n } from "../../lib/i18n";
+import { useNotificationPolling } from "../../lib/notifications";
 import { usePushNotifications } from "../../lib/push";
 import { UserTypeContext } from "../../lib/session-context";
 import { useUnreadCount, useUnreadPolling } from "../../lib/unread";
@@ -34,6 +35,8 @@ export default function Layout() {
   // Badge on the Chat tab: unread messages + waiting requests
   useUnreadPolling({ enabled: authState === "in" && userType === "1" });
   const unread = useUnreadCount();
+  // Badge on the notifications bell (everyone, venues too)
+  useNotificationPolling({ enabled: authState === "in" });
 
   // Auth guard: protected screens need a logged-in session
   if (authState === "checking") {

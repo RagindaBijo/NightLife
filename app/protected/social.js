@@ -8,7 +8,6 @@ import {
   FlatList,
   Pressable,
   RefreshControl,
-  StyleSheet,
   Text,
   TextInput,
   View,
@@ -22,6 +21,7 @@ import { openProfile } from "../../lib/openProfile";
 import { useUserType } from "../../lib/session-context";
 import { usePostFeed } from "../../lib/usePostFeed";
 import { useI18n } from "../../lib/i18n";
+import { useNotificationCount } from "../../lib/notifications";
 import { makeStyles, useTheme } from "../../lib/theme-context";
 
 export default function Social() {
@@ -37,6 +37,7 @@ export default function Social() {
   const [searchQuery, setSearchQuery] = useState("");
   const [reportTarget, setReportTarget] = useState(null);
   const searching = searchQuery.trim().length > 0;
+  const notificationCount = useNotificationCount();
 
   useEffect(() => {
     navigation.setOptions({ headerShown: false });
@@ -142,6 +143,21 @@ export default function Social() {
         <Text style={styles.title}>{t("social.title")}</Text>
         <Text style={styles.subtitle}>{t("social.subtitle")}</Text>
       </View>
+      {/* Notifications: follow requests, new followers, likes */}
+      <Pressable
+        onPress={() => router.push("/notifications")}
+        hitSlop={8}
+        style={({ pressed }) => [styles.bell, pressed && styles.pressed]}
+        accessibilityRole="button"
+        accessibilityLabel={t("notifications.title")}
+      >
+        <MaterialIcons name="notifications-none" size={26} color={COLORS.text} />
+        {notificationCount > 0 && (
+          <View style={styles.bellBadge}>
+            <Text style={styles.bellBadgeText}>{notificationCount > 99 ? "99+" : notificationCount}</Text>
+          </View>
+        )}
+      </Pressable>
       {isUser && (
         <Pressable
           onPress={openCreatePost}
@@ -296,6 +312,32 @@ const useStyles = makeStyles((COLORS) => ({
     height: "100%",
     color: COLORS.text,
     fontSize: 15,
+  },
+  bell: {
+    width: 40,
+    height: 40,
+    alignItems: "center",
+    justifyContent: "center",
+    marginRight: 6,
+  },
+  bellBadge: {
+    position: "absolute",
+    top: 2,
+    right: 0,
+    minWidth: 18,
+    height: 18,
+    paddingHorizontal: 4,
+    borderRadius: 9,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: COLORS.accentPink,
+    borderWidth: 2,
+    borderColor: COLORS.background,
+  },
+  bellBadgeText: {
+    color: "#FFFFFF",
+    fontSize: 10,
+    fontWeight: "800",
   },
   createButton: {
     flexDirection: "row",

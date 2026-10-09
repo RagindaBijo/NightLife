@@ -374,7 +374,13 @@ export async function handleSocial({ request, env, ctx, user, method, route, sea
                  WHERE mine.user_id = ? AND theirs.user_id = up.id AND e.starts_at >= ?) AS shared_events,
                 (SELECT COUNT(*) FROM venue_favorites mine
                    JOIN venue_favorites theirs ON theirs.venue_id = mine.venue_id
-                 WHERE mine.user_id = ? AND theirs.user_id = up.id) AS shared_venues
+                 WHERE mine.user_id = ? AND theirs.user_id = up.id) AS shared_venues,
+                (SELECT COUNT(*) FROM user_music mine
+                   JOIN user_music theirs ON theirs.genre = mine.genre
+                 WHERE mine.user_id = ? AND theirs.user_id = up.id) AS shared_music,
+                (SELECT COUNT(*) FROM user_venue_types mine
+                   JOIN user_venue_types theirs ON theirs.type = mine.type
+                 WHERE mine.user_id = ? AND theirs.user_id = up.id) AS shared_places
          FROM user_profile up
          JOIN login_data ld ON ld.id = up.id
          WHERE up.id != ?
@@ -393,13 +399,14 @@ export async function handleSocial({ request, env, ctx, user, method, route, sea
            -- no open request either way
            AND up.id NOT IN (SELECT to_id FROM chat_requests WHERE from_id = ? AND status = 'pending')
            AND up.id NOT IN (SELECT from_id FROM chat_requests WHERE to_id = ? AND status = 'pending')
-         ORDER BY (shared_events * 3 + shared_venues) DESC,
+         ORDER BY (shared_events * 3 + shared_venues + shared_music + shared_places) DESC,
                   (up.profile_photo IS NOT NULL) DESC,
                   RANDOM()
          LIMIT ?`,
       )
       .bind(
-        me.id, upcoming, me.id, me.id, adultBirthCutoff(),
+        me.id, upcoming, me.id, me.id, me.id,
+        me.id, adultBirthCutoff(),
         me.id, me.id,
         me.id, daysAgoIso(PASS_HIDE_DAYS),
         me.id, me.id, me.id, now,
@@ -410,9 +417,11 @@ export async function handleSocial({ request, env, ctx, user, method, route, sea
 
     if (people.length === 0) return json([]);
 
-    // Details for each card in one round trip: events and venues in common, recent photos
-    const details = await db.batch(
-      people.flatMap((p) => [
+    // Details for each card in one round trip: events and venues in common,
+    // recent photos and their music / place preferences (plus mine, last)
+    const PER_PERSON = 5;
+    const details = await db.batch([
+      ...people.flatMap((p) => [
         db.prepare(
           `SELECT e.id, e.title, e.starts_at FROM event_interests mine
              JOIN event_interests theirs ON theirs.event_id = mine.event_id
@@ -429,21 +438,45 @@ export async function handleSocial({ request, env, ctx, user, method, route, sea
         db.prepare(
           "SELECT photo_id FROM posts WHERE user_id = ? AND photo_id IS NOT NULL ORDER BY create_date DESC LIMIT 3",
         ).bind(p.id),
+        db.prepare("SELECT genre FROM user_music WHERE user_id = ?").bind(p.id),
+        db.prepare("SELECT type FROM user_venue_types WHERE user_id = ?").bind(p.id),
       ]),
-    );
+      db.prepare("SELECT genre FROM user_music WHERE user_id = ?").bind(me.id),
+      db.prepare("SELECT type FROM user_venue_types WHERE user_id = ?").bind(me.id),
+    ]);
+    const myMusic = details[details.length - 2].results.map((row) => row.genre);
+    const myPlaces = details[details.length - 1].results.map((row) => row.type);
+
+    // "Vibe": how much of the smaller list overlaps, music and places averaged (0–100)
+    const overlap = (a, b) => {
+      const shared = a.filter((key) => b.includes(key));
+      return { shared, score: Math.min(a.length, b.length) ? shared.length / Math.min(a.length, b.length) : 0 };
+    };
 
     return json(
-      people.map((p, i) => ({
-        id: p.id,
-        username: p.username,
-        first_name: p.first_name,
-        age: ageFrom(p.birth_date),
-        bio: p.bio_text || "",
-        profile_photo: toImageUrl(p.profile_photo),
-        shared_events: details[i * 3].results,
-        shared_venues: details[i * 3 + 1].results,
-        photos: details[i * 3 + 2].results.map((row) => toImageUrl(row.photo_id)),
-      })),
+      people.map((p, i) => {
+        const at = (k) => details[i * PER_PERSON + k].results;
+        const music = at(3).map((row) => row.genre);
+        const venueTypes = at(4).map((row) => row.type);
+        const musicMatch = overlap(myMusic, music);
+        const placeMatch = overlap(myPlaces, venueTypes);
+        return {
+          id: p.id,
+          username: p.username,
+          first_name: p.first_name,
+          age: ageFrom(p.birth_date),
+          bio: p.bio_text || "",
+          profile_photo: toImageUrl(p.profile_photo),
+          shared_events: at(0),
+          shared_venues: at(1),
+          photos: at(2).map((row) => toImageUrl(row.photo_id)),
+          music,
+          venue_types: venueTypes,
+          shared_music: musicMatch.shared,
+          shared_venue_types: placeMatch.shared,
+          vibe: Math.round(((musicMatch.score + placeMatch.score) / 2) * 100),
+        };
+      }),
     );
   }
 

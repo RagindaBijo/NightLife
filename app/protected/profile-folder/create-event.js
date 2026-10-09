@@ -3,8 +3,8 @@ import { File } from 'expo-file-system';
 import { Image } from 'expo-image';
 import * as ImagePicker from 'expo-image-picker';
 import { useLocalSearchParams, useNavigation, useRouter } from 'expo-router';
-import { useEffect, useLayoutEffect, useState } from 'react';
-import { Alert, Keyboard, Modal, StyleSheet, Text, TextInput, TouchableOpacity, TouchableWithoutFeedback, View } from 'react-native';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { Alert, Keyboard, Modal, Text, TextInput, TouchableOpacity, TouchableWithoutFeedback, View } from 'react-native';
 import { API_URL, api, getSession } from '../../../lib/api';
 import { formatClock } from '../../../lib/format';
 import { translate, useI18n } from '../../../lib/i18n';
@@ -75,6 +75,7 @@ export default function CreateEvent() {
   const [showDateModal, setShowDateModal] = useState(false);
   const [showTimeModal, setShowTimeModal] = useState(false);
   const [loading, setLoading] = useState(false);
+  const saveRef = useRef(null); // the header's Save button always runs the latest handleSave
 
   const start = fromParts(form);
   const thisYear = new Date().getFullYear();
@@ -91,12 +92,12 @@ export default function CreateEvent() {
         </TouchableOpacity>
       ),
       headerRight: () => (
-        <TouchableOpacity onPress={handleSave}>
+        <TouchableOpacity onPress={() => saveRef.current?.()}>
           <Text style={styles.headerButtonText}>{isEditing ? t('createEvent.update') : t('createEvent.create')}</Text>
         </TouchableOpacity>
       ),
     });
-  }, [navigation, form, isEditing, styles, t]);
+  }, [navigation, router, isEditing, styles, t]);
 
   useEffect(() => {
     const fetchEvent = async () => {
@@ -129,7 +130,7 @@ export default function CreateEvent() {
 
   const pickImage = async () => {
     const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      mediaTypes: ['images'],
       allowsMultipleSelection: false,
       quality: 1,
     });
@@ -211,6 +212,10 @@ export default function CreateEvent() {
     }
     setLoading(false);
   };
+
+  useEffect(() => {
+    saveRef.current = handleSave;
+  });
 
   const handleOutsidePress = () => {
     Keyboard.dismiss();

@@ -7,7 +7,6 @@ import {
   FlatList,
   Pressable,
   RefreshControl,
-  StyleSheet,
   Text,
   TextInput,
   View,

@@ -8,7 +8,7 @@ import { makeStyles, useTheme } from "../lib/theme-context";
  * Personal accounts need a profile photo, first name, last name and username
  * before they can post, chat or be seen. Shows what's missing and a button to
  * Edit Profile.
- *   missing: ["photo", "firstName", "lastName", "username"] (optional, for the checklist)
+ *   missing: ["photo", "firstName", "lastName", "username", "music", "places"] (optional checklist)
  *   compact: banner style (inside the profile) instead of a full screen
  */
 export default function CompleteProfileNotice({ missing, compact = false }) {
@@ -72,6 +72,8 @@ export function missingProfileFields(profile) {
     !profile?.first_name?.trim() && "firstName",
     !profile?.last_name?.trim() && "lastName",
     !profile?.username?.trim() && "username",
+    (profile?.music?.length ?? 0) < 3 && "music",
+    (profile?.venue_types?.length ?? 0) < 3 && "places",
   ].filter(Boolean);
 }
 

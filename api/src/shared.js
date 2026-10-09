@@ -126,26 +126,89 @@ export const NOT_BLOCKED_SQL = (column) => `
   ${column} NOT IN (SELECT blocked_id FROM blocks WHERE blocker_id = ?)
   AND ${column} NOT IN (SELECT blocker_id FROM blocks WHERE blocked_id = ?)`;
 
+// ── Following ────────────────────────────────────
+
+/** "following" | "requested" (waiting for them to accept) | "none" */
+export const followStatus = (isFollowing, isRequested) =>
+  isFollowing ? "following" : isRequested ? "requested" : "none";
+
+// Notifications are read straight from the follow / like tables (nothing extra
+// is stored, so an unlike or unfollow simply makes its notification disappear).
+// Prepend to a query that reads FROM n; bind with notificationBinds(userId).
+export const NOTIFICATIONS_SQL = `
+  WITH n AS (
+    SELECT 'follow_request' AS type, r.requester_id AS user_id, NULL AS post_id, NULL AS post_image, r.create_date AS date
+    FROM follow_requests r WHERE r.target_id = ?
+    UNION ALL
+    SELECT 'follow', f.follower_id, NULL, NULL, f.create_date
+    FROM follows f WHERE f.following_id = ?
+    UNION ALL
+    SELECT 'follow_accepted', f.following_id, NULL, NULL, f.create_date
+    FROM follows f WHERE f.follower_id = ? AND f.via_request = 1
+    UNION ALL
+    SELECT 'like', l.user_id, p.id, p.photo_id, l.create_date
+    FROM post_likes l JOIN posts p ON p.id = l.post_id
+    WHERE p.user_id = ? AND l.user_id <> ?
+  )`;
+export const notificationBinds = (userId) => [userId, userId, userId, userId, userId];
+
 // ── Complete profiles ────────────────────────────
 
+// Music styles and kinds of places people can pick (keys; the app translates them).
+// Keep in sync with lib/preferences.js in the app.
+export const MUSIC_GENRES = [
+  "techno", "house", "deep_house", "electronic", "drum_and_bass", "trance",
+  "hip_hop", "rnb", "pop", "rock", "indie", "metal", "jazz", "reggaeton",
+  "latin", "disco_funk", "georgian",
+];
+export const PLACE_TYPES = [
+  "nightclub", "disco", "live_music", "karaoke", "bar", "pub", "lounge",
+  "cocktail_bar", "wine_bar", "rooftop", "beach_bar", "restaurant_bar",
+];
+export const MIN_PREFERENCES = 3;
+export const MAX_PREFERENCES = 10;
+
+// Post photo shape (width ÷ height): portrait 4:5 up to landscape 1.91:1.
+// Keep in sync with lib/postShape.js in the app.
+export const POST_RATIO_MIN = 0.8;
+export const POST_RATIO_MAX = 1.91;
+
+/** A post's photo shape kept within the limits, or null when none was sent. */
+export function cleanPhotoRatio(value) {
+  if (value === undefined || value === null) return null;
+  const ratio = Number(value);
+  if (!Number.isFinite(ratio) || ratio <= 0) throw new HttpError(400, "Invalid photo_ratio", "invalid_photo_ratio");
+  return Math.round(Math.min(POST_RATIO_MAX, Math.max(POST_RATIO_MIN, ratio)) * 1000) / 1000;
+}
+
 /**
- * A personal account is "complete" with a username, first name, last name and
- * profile photo (bio is optional). Incomplete accounts can't post, chat or use
- * Discover, and nobody else can see them.
+ * A personal account is "complete" with a username, first name, last name,
+ * profile photo and at least 3 music styles and 3 kinds of places (bio is
+ * optional). Incomplete accounts can't post, chat or use Discover, and nobody
+ * else can see them. `alias` is the user_profile table (or its alias).
  */
 export const COMPLETE_PROFILE_SQL = (alias) => `(
   COALESCE(TRIM(${alias}.username), '') != ''
   AND COALESCE(TRIM(${alias}.first_name), '') != ''
   AND COALESCE(TRIM(${alias}.last_name), '') != ''
-  AND COALESCE(${alias}.profile_photo, '') != '')`;
+  AND COALESCE(${alias}.profile_photo, '') != ''
+  AND (SELECT COUNT(*) FROM user_music WHERE user_id = ${alias}.id) >= ${MIN_PREFERENCES}
+  AND (SELECT COUNT(*) FROM user_venue_types WHERE user_id = ${alias}.id) >= ${MIN_PREFERENCES})`;
 
-/** Same rule for a profile row already loaded in JavaScript. */
-export const isProfileComplete = (profile) =>
-  !!profile &&
-  !!profile.username?.trim() &&
-  !!profile.first_name?.trim() &&
-  !!profile.last_name?.trim() &&
-  !!profile.profile_photo;
+/**
+ * Checks a list of picked keys: only known values, between 3 and 10, no duplicates.
+ * Returns the cleaned list or throws.
+ */
+export function cleanPreferences(value, allowed, field) {
+  const list = Array.isArray(value) ? [...new Set(value.map(String))] : null;
+  if (!list || !list.every((key) => allowed.includes(key))) {
+    throw new HttpError(400, `Invalid ${field}`, "invalid_preferences");
+  }
+  if (list.length < MIN_PREFERENCES || list.length > MAX_PREFERENCES) {
+    throw new HttpError(400, `Pick ${MIN_PREFERENCES}–${MAX_PREFERENCES} ${field}`, "preferences_count");
+  }
+  return list;
+}
 
 // ── Images ───────────────────────────────────────
 

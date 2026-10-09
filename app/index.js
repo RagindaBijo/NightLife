@@ -6,7 +6,6 @@ import { api, getSession, saveSession } from "../lib/api";
 export default function Index() {
   const [isLoading, setIsLoading] = useState(true);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [userType, setUserType] = useState(null);
 
   useEffect(() => {
     const checkAuth = async () => {
@@ -20,7 +19,6 @@ export default function Index() {
         // Fetch user data from /api/login/:id (a 401 signs the user out)
         const data = await api(`/api/login/${session.userId}`);
         if (data.user_type) {
-          setUserType(data.user_type);
           await saveSession({ ...session, userType: data.user_type });
           setIsAuthenticated(true);
         } else {

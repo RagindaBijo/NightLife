@@ -1,5 +1,5 @@
 import { MaterialIcons } from "@expo/vector-icons";
-import { ScrollView, StyleSheet, Text, View } from "react-native";
+import { ScrollView, Text, View } from "react-native";
 import { useI18n } from "../lib/i18n";
 import { makeStyles, useTheme } from "../lib/theme-context";
 

@@ -1,6 +1,7 @@
 import { DarkTheme, DefaultTheme, Stack, ThemeProvider } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { useMemo } from 'react';
+import SplashOverlay from '../components/SplashOverlay';
 import { I18nProvider, useI18n } from '../lib/i18n';
 import { AppThemeProvider, useTheme } from '../lib/theme-context';
 
@@ -39,6 +40,7 @@ function ThemedStack() {
         <Stack.Screen name="privacy" options={{ title: t('settings.privacyPolicy') }} />
         <Stack.Screen name="user/[id]" options={{ headerShown: false }} />
         <Stack.Screen name="user/posts" options={{ headerShown: false }} />
+        <Stack.Screen name="notifications" options={{ headerShown: false }} />
       </Stack>
     </ThemeProvider>
   );
@@ -46,10 +48,14 @@ function ThemedStack() {
 
 export default function RootLayout() {
   return (
-    <I18nProvider>
-      <AppThemeProvider>
-        <ThemedStack />
-      </AppThemeProvider>
-    </I18nProvider>
+    <>
+      <I18nProvider>
+        <AppThemeProvider>
+          <ThemedStack />
+        </AppThemeProvider>
+      </I18nProvider>
+      {/* Glowing logo for ~1.2 s while the app loads underneath */}
+      <SplashOverlay />
+    </>
   );
 }

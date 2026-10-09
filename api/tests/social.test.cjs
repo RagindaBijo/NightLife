@@ -33,7 +33,8 @@ module.exports = async ({ BASE, call, check, sql, query, sleep, registerUser, re
   check("not the 16-year-old, venue or yourself", [ids.includes(D.userId), ids.includes(V.userId), ids.includes(A.userId)], [false, false, false]);
   check("shared venue ranks first", deck[0].id, C.userId);
   check("card: shared venue + age", [deck[0].shared_venues.map((v) => v.title), typeof deck[0].age], [["Club CV"], "number"]);
-  check("card: only public fields", Object.keys(deck[0]).sort(), ["age", "bio", "first_name", "id", "photos", "profile_photo", "shared_events", "shared_venues", "username"]);
+  check("card: only public fields", Object.keys(deck[0]).sort(), ["age", "bio", "first_name", "id", "music", "photos", "profile_photo", "shared_events", "shared_music", "shared_venue_types", "shared_venues", "username", "venue_types", "vibe"]);
+  check("same tastes → vibe 100", deck[0].vibe, 100);
   await call(`/api/user/${B.userId}`, { method: "PUT", token: B.token, body: { is_hidden: true } });
   check("hidden profile not in Discover", (await call("/api/discover", { token: A.token })).data.some((p) => p.id === B.userId), false);
   await call(`/api/user/${B.userId}`, { method: "PUT", token: B.token, body: { is_hidden: false } });
@@ -94,7 +95,9 @@ module.exports = async ({ BASE, call, check, sql, query, sleep, registerUser, re
 
   // ── Mutual follows ──
   check("not connected yet", (await call("/api/chats", { method: "POST", token: A.token, body: { user_id: F.userId } })).data.code, "not_connected");
+  // A asks to follow F, F accepts, then F follows back
   await call(`/api/users/${F.userId}/follow`, { method: "PUT", token: A.token });
+  await call(`/api/follow-requests/${A.userId}`, { method: "PUT", token: F.token, body: { accept: true } });
   await call(`/api/users/${A.userId}/follow`, { method: "PUT", token: F.token });
   check("mutual followers: can_message", (await statusOf(A, F)).chat_status, "can_message");
   const chatAF = (await call("/api/chats", { method: "POST", token: A.token, body: { user_id: F.userId } })).data.chat_id;

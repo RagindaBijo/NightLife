@@ -1,0 +1,5 @@
+{
+  "NSPhotoLibraryUsageDescription": "Выбирайте фото для профиля, постов и галереи заведения.",
+  "NSCameraUsageDescription": "Камера позволяет снимать фото для профиля и постов.",
+  "NSLocationWhenInUseUsageDescription": "Ваше местоположение нужно, чтобы показывать ближайшие заведения и события на карте."
+}

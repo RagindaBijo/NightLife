@@ -19,6 +19,7 @@ import {
 import CompleteProfileNotice, { missingProfileFields } from "../../../components/CompleteProfileNotice";
 import { api, getSession } from "../../../lib/api";
 import { translate, useI18n } from "../../../lib/i18n";
+import { assetRatio } from "../../../lib/postShape";
 import { makeStyles, useTheme } from "../../../lib/theme-context";
 
 const MAX_SUGGESTIONS = 5;
@@ -98,19 +99,10 @@ export default function CreatePost() {
     setLocation("");
   };
 
+  // The system photo picker needs no permission: the app only gets the photo the user picks
   const pickImage = async () => {
-    const permissionResult =
-      await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (!permissionResult.granted) {
-      Alert.alert(
-        t("common.permissionDenied"),
-        t("common.photosPermission"),
-      );
-      return;
-    }
-
     const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      mediaTypes: ["images"],
       allowsEditing: false,
       quality: 1,
     });
@@ -151,6 +143,7 @@ export default function CreatePost() {
           post_text: caption.trim(),
           location_tag: location.trim(),
           photo_id: key,
+          photo_ratio: assetRatio(selectedImage),
         },
       });
 
@@ -159,7 +152,7 @@ export default function CreatePost() {
     } catch (error) {
       console.error("Create Post Error:", error.message);
       if (error.code === "profile_incomplete") {
-        setMissing(["photo", "firstName", "lastName", "username"]);
+        setMissing(["photo", "firstName", "lastName", "username", "music", "places"]);
         return;
       }
       Alert.alert(
@@ -193,6 +186,8 @@ export default function CreatePost() {
           disabled={uploading}
           style={({ pressed }) => [
             styles.photoBox,
+            // The preview has the same shape the post will have
+            selectedImage && { aspectRatio: assetRatio(selectedImage) },
             !selectedImage && styles.photoBoxEmpty,
             pressed && styles.pressed,
           ]}

@@ -4,6 +4,7 @@ import { LinearGradient } from "expo-linear-gradient";
 import { memo, useRef, useState } from "react";
 import { Animated, Pressable, StyleSheet, Text, View } from "react-native";
 import { translate, useI18n } from "../lib/i18n";
+import { postRatio } from "../lib/postShape";
 import { makeStyles, useTheme } from "../lib/theme-context";
 
 const DOUBLE_TAP_MS = 280;
@@ -130,7 +131,7 @@ const PostCard = memo(function PostCard({ post, onToggleLike, onOptions, onAutho
       {/* Photo */}
       <Pressable
         onPress={handleImagePress}
-        style={styles.imageWrap}
+        style={[styles.imageWrap, { aspectRatio: postRatio(post.photo_ratio) }]}
         accessibilityHint={t("post.doubleTapHint")}
       >
         {post.post_image ? (
@@ -249,11 +250,10 @@ const useStyles = makeStyles((COLORS) => ({
   optionsButton: {
     marginLeft: 8,
   },
-  // The 4:5 shape lives on the wrapper and the photo fills it, so the rounded
-  // corners always clip the photo itself (no empty space below it)
+  // The post's shape (4:5 up to 1.91:1, set inline) lives on the wrapper and the
+  // photo fills it, so the rounded corners always clip the photo itself
   imageWrap: {
     width: "100%",
-    aspectRatio: 4 / 5,
     marginTop: 10,
     borderRadius: 16,
     overflow: "hidden",

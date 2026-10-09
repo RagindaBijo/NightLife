@@ -1,16 +1,30 @@
-import { MaterialIcons } from "@expo/vector-icons";
+import { MaterialCommunityIcons, MaterialIcons } from "@expo/vector-icons";
 import { Image } from "expo-image";
 import { LinearGradient } from "expo-linear-gradient";
 import { useRouter } from "expo-router";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ActivityIndicator, Alert, Modal, Pressable, Text, View } from "react-native";
+import {
+  ActivityIndicator,
+  Alert,
+  Animated,
+  Modal,
+  PanResponder,
+  Pressable,
+  StyleSheet,
+  Text,
+  useWindowDimensions,
+  View,
+} from "react-native";
 import SocialGate from "../../components/social/SocialGate";
-import SwipeCard from "../../components/social/SwipeCard";
+import VibeCard from "../../components/social/VibeCard";
 import { api } from "../../lib/api";
 import { useI18n } from "../../lib/i18n";
 import { makeStyles, useTheme } from "../../lib/theme-context";
 
 const LOAD_MORE_AT = 3; // fetch more people when this few are left
+const SWIPE_DISTANCE = 110; // drag this far (px) to decide
+const SWIPE_SPEED = 0.8; // or flick this fast
+const NEXT_SCALE = 0.94; // size of the card waiting behind
 
 export default function Discover() {
   const styles = useStyles();
@@ -23,17 +37,47 @@ export default function Discover() {
   );
 }
 
+/**
+ * One person at a time as a "pass" card. "Let's go out" = like, "Skip" = pass.
+ * Two people who both pick "Let's go out" get a chat (the match logic is on the server).
+ */
 function Deck() {
   const { colors: COLORS, gradients: GRADIENTS } = useTheme();
   const { t } = useI18n();
   const styles = useStyles();
   const router = useRouter();
-  const topCard = useRef(null);
   const [people, setPeople] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [match, setMatch] = useState(null); // { chat_id, user }
+  const [match, setMatch] = useState(null); // { chat_id, user, person }
+  const [busy, setBusy] = useState(false); // during the card animation
   const seen = useRef(new Set()); // ids already shown, so a refill never repeats them
+  const { width } = useWindowDimensions();
+  // Card animation: drag position (tilts with it) and the next card growing into place
+  const [pan] = useState(() => new Animated.ValueXY());
+  const [scale] = useState(() => new Animated.Value(1));
+  const decideRef = useRef(null);
+  const rotate = pan.x.interpolate({ inputRange: [-width, 0, width], outputRange: ["-12deg", "0deg", "12deg"] });
+
+  // Drag the card: right = connect, left = skip, a short drag springs back.
+  // decideRef is only read inside the gesture callbacks, never while rendering
+  // eslint-disable-next-line react-hooks/refs
+  const [responder] = useState(() =>
+    PanResponder.create({
+      // Sideways drags belong to the swipe (taken before the card's vertical scroll
+      // can claim them); up/down drags scroll the card
+      onMoveShouldSetPanResponderCapture: (_, g) => Math.abs(g.dx) > 10 && Math.abs(g.dx) > Math.abs(g.dy) * 1.5,
+      onPanResponderTerminationRequest: () => false,
+      onPanResponderMove: Animated.event([null, { dx: pan.x, dy: pan.y }], { useNativeDriver: false }),
+      onPanResponderRelease: (_, g) => {
+        if (g.dx > SWIPE_DISTANCE || g.vx > SWIPE_SPEED) decideRef.current?.(true);
+        else if (g.dx < -SWIPE_DISTANCE || g.vx < -SWIPE_SPEED) decideRef.current?.(false);
+        else Animated.spring(pan, { toValue: { x: 0, y: 0 }, useNativeDriver: false, friction: 6 }).start();
+      },
+      onPanResponderTerminate: () =>
+        Animated.spring(pan, { toValue: { x: 0, y: 0 }, useNativeDriver: false, friction: 6 }).start(),
+    }),
+  );
 
   const loadMore = useCallback(() => {
     return Promise.resolve()
@@ -58,18 +102,37 @@ function Deck() {
     loadMore();
   }, [loadMore]);
 
-  const swiped = (person, like) => {
-    const rest = people.filter((p) => p.id !== person.id);
-    setPeople(rest);
-    if (rest.length <= LOAD_MORE_AT && !loading) loadMore();
-    api("/api/discover/swipe", { method: "POST", body: { target_id: person.id, like } })
-      .then((result) => {
-        if (result.match) setMatch({ chat_id: result.chat_id, user: result.user, person });
-      })
-      .catch((err) => {
-        if (err.code !== "not_available") Alert.alert(t("discover.swipeError"), err.message);
-      });
+  // The card flies off (right = connect, left = skip) and the next one grows into place
+  const decide = (like) => {
+    const person = people?.[0];
+    if (!person || busy) return;
+    setBusy(true);
+    Animated.timing(pan, {
+      toValue: { x: (like ? 1 : -1) * width * 1.5, y: 40 },
+      duration: 260,
+      useNativeDriver: false,
+    }).start(() => {
+      const rest = people.filter((p) => p.id !== person.id);
+      setPeople(rest);
+      if (rest.length <= LOAD_MORE_AT && !loading) loadMore();
+      pan.setValue({ x: 0, y: 0 });
+      scale.setValue(NEXT_SCALE);
+      Animated.spring(scale, { toValue: 1, useNativeDriver: false, bounciness: 4 }).start(() => setBusy(false));
+
+      api("/api/discover/swipe", { method: "POST", body: { target_id: person.id, like } })
+        .then((result) => {
+          if (result.match) setMatch({ chat_id: result.chat_id, user: result.user, person });
+        })
+        .catch((err) => {
+          if (err.code !== "not_available") Alert.alert(t("discover.swipeError"), err.message);
+        });
+    });
   };
+
+  // The drag handler always calls the latest decide()
+  useEffect(() => {
+    decideRef.current = decide;
+  });
 
   const refresh = () => {
     seen.current = new Set();
@@ -95,13 +158,14 @@ function Deck() {
     );
   }
 
-  const visible = people.slice(0, 2);
+  const person = people[0];
+  const nextPerson = people[1];
 
   return (
     <>
       {header}
       <View style={styles.deck}>
-        {visible.length === 0 ? (
+        {!person ? (
           <View style={styles.centered}>
             {loading ? (
               <ActivityIndicator size="large" color={COLORS.accent} />
@@ -120,41 +184,56 @@ function Deck() {
             )}
           </View>
         ) : (
-          // Drawn back to front, so the top card is the last one
-          [...visible].reverse().map((person, index) => {
-            const isTop = index === visible.length - 1;
-            return (
-              <View key={person.id} style={[styles.cardSlot, !isTop && styles.cardBehind]}>
-                <SwipeCard
-                  ref={isTop ? topCard : undefined}
-                  person={person}
-                  active={isTop}
-                  onSwiped={(like) => swiped(person, like)}
-                />
+          <>
+            {/* The next person waits behind, slightly smaller */}
+            {!!nextPerson && (
+              <View
+                key={`next-${nextPerson.id}`}
+                style={[StyleSheet.absoluteFill, { transform: [{ scale: NEXT_SCALE }] }]}
+                pointerEvents="none"
+              >
+                <VibeCard person={nextPerson} />
               </View>
-            );
-          })
+            )}
+            <Animated.View
+              key={person.id}
+              {...responder.panHandlers}
+              style={[
+                styles.cardWrap,
+                { transform: [{ translateX: pan.x }, { translateY: pan.y }, { rotate }, { scale }] },
+              ]}
+            >
+              <VibeCard person={person} />
+            </Animated.View>
+          </>
         )}
       </View>
 
-      {visible.length > 0 && (
+      {!!person && (
         <View style={styles.actions}>
           <Pressable
-            onPress={() => topCard.current?.swipe(false)}
-            style={({ pressed }) => [styles.actionButton, pressed && styles.pressed]}
+            onPress={() => decide(false)}
+            disabled={busy}
+            style={({ pressed }) => [styles.skipButton, pressed && styles.pressed]}
             accessibilityRole="button"
-            accessibilityLabel={t("discover.pass")}
           >
-            <MaterialIcons name="close" size={32} color={COLORS.danger} />
+            <MaterialIcons name="close" size={22} color={COLORS.text} />
+            <Text style={styles.skipText}>{t("discover.skip")}</Text>
           </Pressable>
           <Pressable
-            onPress={() => topCard.current?.swipe(true)}
-            style={({ pressed }) => [pressed && styles.pressed]}
+            onPress={() => decide(true)}
+            disabled={busy}
+            style={({ pressed }) => [styles.goWrap, pressed && styles.pressed]}
             accessibilityRole="button"
-            accessibilityLabel={t("discover.likeButton")}
           >
-            <LinearGradient colors={GRADIENTS.brand} style={[styles.actionButton, styles.likeButton]}>
-              <MaterialIcons name="favorite" size={32} color={COLORS.onImage} />
+            <LinearGradient
+              colors={GRADIENTS.brand}
+              start={{ x: 0, y: 0.5 }}
+              end={{ x: 1, y: 0.5 }}
+              style={styles.goButton}
+            >
+              <MaterialCommunityIcons name="hand-wave" size={22} color={COLORS.onImage} />
+              <Text style={styles.goText}>{t("discover.connect")}</Text>
             </LinearGradient>
           </Pressable>
         </View>
@@ -163,8 +242,9 @@ function Deck() {
       <Modal visible={!!match} transparent animationType="fade" onRequestClose={() => setMatch(null)}>
         <View style={styles.matchBackdrop}>
           <View style={styles.matchCard}>
+            <MaterialCommunityIcons name="hand-wave" size={34} color={COLORS.accentPink} />
             <Text style={styles.matchTitle}>{t("discover.matchTitle")}</Text>
-            {match?.person?.profile_photo || match?.user?.profile_photo ? (
+            {match?.user?.profile_photo || match?.person?.profile_photo ? (
               <Image
                 source={{ uri: match.user?.profile_photo || match.person.profile_photo }}
                 style={styles.matchPhoto}
@@ -182,7 +262,7 @@ function Deck() {
               onPress={() => {
                 const chatId = match.chat_id;
                 setMatch(null);
-                router.push(`/protected/chat-folder/${chatId}`);
+                router.push(`/protected/chat-folder/${chatId}`, { withAnchor: true });
               }}
               style={({ pressed }) => [styles.matchPrimary, pressed && styles.pressed]}
             >
@@ -222,36 +302,47 @@ const useStyles = makeStyles((COLORS) => ({
     flex: 1,
     marginHorizontal: 16,
   },
-  cardSlot: {
-    position: "absolute",
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-  },
-  cardBehind: {
-    transform: [{ scale: 0.95 }, { translateY: 10 }],
-    opacity: 0.85,
+  cardWrap: {
+    flex: 1,
   },
   actions: {
     flexDirection: "row",
-    justifyContent: "center",
-    alignItems: "center",
-    gap: 28,
-    paddingVertical: 16,
+    gap: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
   },
-  actionButton: {
-    width: 64,
-    height: 64,
-    borderRadius: 32,
+  skipButton: {
+    flex: 1,
+    height: 54,
+    flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: COLORS.surface,
-    borderWidth: 1,
+    gap: 6,
+    borderRadius: 27,
+    borderWidth: 1.5,
     borderColor: COLORS.border,
+    backgroundColor: COLORS.surface,
   },
-  likeButton: {
-    borderWidth: 0,
+  skipText: {
+    color: COLORS.text,
+    fontSize: 16,
+    fontWeight: "700",
+  },
+  goWrap: {
+    flex: 1.6,
+  },
+  goButton: {
+    height: 54,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    borderRadius: 27,
+  },
+  goText: {
+    color: COLORS.onImage,
+    fontSize: 16,
+    fontWeight: "800",
   },
   pressed: {
     opacity: 0.7,
@@ -316,8 +407,9 @@ const useStyles = makeStyles((COLORS) => ({
   },
   matchTitle: {
     color: COLORS.accentPink,
-    fontSize: 30,
+    fontSize: 28,
     fontWeight: "900",
+    marginTop: 6,
   },
   matchPhoto: {
     width: 130,

@@ -19,9 +19,13 @@ import {
   TextInput,
   View,
 } from "react-native";
+import PreferencePicker from "../../../components/PreferencePicker";
 import { API_URL, api, getSession } from "../../../lib/api";
+import { MIN_PREFERENCES, MUSIC_GENRES, PLACE_TYPES, musicLabel, placeLabel } from "../../../lib/preferences";
 import { translate, useI18n } from "../../../lib/i18n";
 import { makeStyles, useTheme } from "../../../lib/theme-context";
+
+const SHEET_CLOSE_MS = 400; // the photo menu's fade-out, plus a little margin
 
 function Field({ label, prefix, multiline, ...inputProps }) {
   const { colors: COLORS } = useTheme();
@@ -77,6 +81,8 @@ export default function EditProfile() {
     username: "",
     bio_text: "",
     profile_photo: "", // full URL, or "" when there is no photo
+    music: [], // music style keys (min 3)
+    venue_types: [], // kinds of places (min 3)
   });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -117,6 +123,8 @@ export default function EditProfile() {
             bio_text: data.bio_text || "",
             // profile_photo is a full URL from the API
             profile_photo: data.profile_photo || "",
+            music: data.music ?? [],
+            venue_types: data.venue_types ?? [],
           });
           setError(null);
         })
@@ -176,20 +184,18 @@ export default function EditProfile() {
     }
   };
 
-  const pickImage = async () => {
+  // The photo menu must be fully closed first: a picker opened while it's still
+  // fading out is silently ignored by the phone
+  const closePhotoMenu = () => {
     setShowPhotoModal(false);
-    const permissionResult =
-      await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (!permissionResult.granted) {
-      Alert.alert(
-        t("common.permissionDenied"),
-        t("common.photosPermission"),
-      );
-      return;
-    }
+    return new Promise((resolve) => setTimeout(resolve, SHEET_CLOSE_MS));
+  };
 
+  // The system photo picker needs no permission: the app only gets the photo the user picks
+  const pickImage = async () => {
+    await closePhotoMenu();
     const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      mediaTypes: ["images"],
       allowsEditing: true,
       aspect: [1, 1],
       quality: 1,
@@ -201,7 +207,7 @@ export default function EditProfile() {
   };
 
   const takePhoto = async () => {
-    setShowPhotoModal(false);
+    await closePhotoMenu();
     const permissionResult = await ImagePicker.requestCameraPermissionsAsync();
     if (!permissionResult.granted) {
       Alert.alert(
@@ -212,7 +218,7 @@ export default function EditProfile() {
     }
 
     const result = await ImagePicker.launchCameraAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      mediaTypes: ["images"],
       allowsEditing: true,
       aspect: [1, 1],
       quality: 1,
@@ -237,6 +243,11 @@ export default function EditProfile() {
 
   const handleSave = useCallback(async () => {
     if (saving || uploading) return;
+    // At least 3 of each (part of a complete profile)
+    if (form.music.length < MIN_PREFERENCES || form.venue_types.length < MIN_PREFERENCES) {
+      Alert.alert(t("preferences.needMoreTitle"), t("preferences.needMoreText", { min: MIN_PREFERENCES }));
+      return;
+    }
     setSaving(true);
     try {
       const session = await getSession();
@@ -253,6 +264,8 @@ export default function EditProfile() {
           username: form.username.trim(),
           bio_text: form.bio_text.trim(),
           profile_photo: form.profile_photo.replace(`${imageDomain}/`, ""),
+          music: form.music,
+          venue_types: form.venue_types,
         },
       });
 
@@ -268,7 +281,9 @@ export default function EditProfile() {
             ? t("auth.usernameTaken")
             : err.code === "invalid_username"
               ? t("auth.usernameRules")
-              : err.message || t("editProfile.saveFailed"),
+              : err.code === "preferences_count"
+                ? t("preferences.needMoreText", { min: MIN_PREFERENCES })
+                : err.message || t("editProfile.saveFailed"),
       );
     } finally {
       setSaving(false);
@@ -419,6 +434,24 @@ export default function EditProfile() {
           placeholder={t("editProfile.bioPlaceholder")}
           maxLength={300}
           multiline
+        />
+
+        {/* Taste: shown on Discover; at least 3 of each */}
+        <PreferencePicker
+          title={t("preferences.musicTitle")}
+          hint={t("preferences.musicHint", { min: MIN_PREFERENCES })}
+          options={MUSIC_GENRES}
+          label={musicLabel}
+          selected={form.music}
+          onChange={(music) => setForm((prev) => ({ ...prev, music }))}
+        />
+        <PreferencePicker
+          title={t("preferences.placesTitle")}
+          hint={t("preferences.placesHint", { min: MIN_PREFERENCES })}
+          options={PLACE_TYPES}
+          label={placeLabel}
+          selected={form.venue_types}
+          onChange={(venue_types) => setForm((prev) => ({ ...prev, venue_types }))}
         />
       </ScrollView>
 

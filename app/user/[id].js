@@ -16,7 +16,9 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import OptionsSheet from "../../components/OptionsSheet";
 import ReportSheet from "../../components/ReportSheet";
+import TasteStrip from "../../components/TasteStrip";
 import { api, getSession } from "../../lib/api";
+import { followLabelKey, pressFollow } from "../../lib/follow";
 import { useI18n } from "../../lib/i18n";
 import { makeStyles, useTheme } from "../../lib/theme-context";
 
@@ -51,6 +53,7 @@ export default function UserProfile() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [reportTarget, setReportTarget] = useState(null);
   const [chatBusy, setChatBusy] = useState(false);
+  const [myTaste, setMyTaste] = useState(null); // { music, places } of the viewer
 
   const load = useCallback(
     () =>
@@ -64,12 +67,15 @@ export default function UserProfile() {
           return Promise.all([
             api(`/api/user/${encodeURIComponent(id)}`),
             api(`/api/posts?user_id=${encodeURIComponent(id)}`),
+            // Your own tastes, to highlight what you have in common (optional)
+            session ? api(`/api/user/${session.userId}`).catch(() => null) : null,
           ]);
         })
         .then((result) => {
           if (!result) return;
-          const [userData, postData] = result;
+          const [userData, postData, me] = result;
           setProfile(userData);
+          setMyTaste(me ? { music: me.music ?? [], places: me.venue_types ?? [] } : null);
           setPosts(postData.map((post) => ({ id: String(post.id), image: post.post_image })));
           setError(null);
         })
@@ -96,21 +102,24 @@ export default function UserProfile() {
     setRefreshing(false);
   };
 
-  // Optimistic follow / unfollow, rolled back if the server refuses
+  // Follow (a request until they accept), follow back (asks first), unfollow,
+  // or take a request back
   const toggleFollow = async () => {
-    const wasFollowing = profile.is_following;
-    const update = (isFollowing, followers) =>
-      setProfile((prev) => ({ ...prev, is_following: isFollowing, followers_count: followers }));
-    update(!wasFollowing, profile.followers_count + (wasFollowing ? -1 : 1));
     setFollowSaving(true);
     try {
-      const result = await api(`/api/users/${profile.id}/follow`, {
-        method: wasFollowing ? "DELETE" : "PUT",
-      });
-      update(result.following, result.followers_count);
+      const result = await pressFollow(profile);
+      if (result) {
+        setProfile((prev) => ({
+          ...prev,
+          is_following: result.following,
+          follow_status: result.status,
+          followers_count: result.followers_count,
+        }));
+        // Following each other can change what the chat button offers
+        if (result.following && profile.follows_you) load();
+      }
     } catch (err) {
-      console.error("Follow error:", err.message);
-      update(wasFollowing, profile.followers_count);
+      Alert.alert(t("follow.error"), err.message);
     } finally {
       setFollowSaving(false);
     }
@@ -139,7 +148,7 @@ export default function UserProfile() {
     );
 
   // The chat button: request, accept, or open the chat (all checked again by the server)
-  const openChat = (chatId) => router.push(`/protected/chat-folder/${chatId}`);
+  const openChat = (chatId) => router.push(`/protected/chat-folder/${chatId}`, { withAnchor: true });
   const chatAction = async () => {
     setChatBusy(true);
     try {
@@ -291,6 +300,7 @@ export default function UserProfile() {
 
           {!!name && <Text style={styles.name}>{name}</Text>}
           {!!profile.bio_text && <Text style={styles.bio}>{profile.bio_text}</Text>}
+          <TasteStrip music={profile.music} places={profile.venue_types} mine={myTaste} />
 
           {profile.is_blocked ? (
             <View style={styles.blockedBox}>
@@ -313,12 +323,16 @@ export default function UserProfile() {
             disabled={followSaving}
             style={({ pressed }) => [pressed && styles.pressed, styles.followWrap]}
             accessibilityRole="button"
-            accessibilityState={{ selected: profile.is_following }}
+            accessibilityState={{ selected: profile.follow_status !== "none" }}
           >
-            {profile.is_following ? (
+            {profile.follow_status === "following" || profile.follow_status === "requested" ? (
               <View style={[styles.followButton, styles.followingButton]}>
-                <MaterialIcons name="check" size={18} color={COLORS.text} />
-                <Text style={styles.followingText}>{t("userProfile.following")}</Text>
+                <MaterialIcons
+                  name={profile.follow_status === "following" ? "check" : "schedule"}
+                  size={18}
+                  color={COLORS.text}
+                />
+                <Text style={styles.followingText}>{t(followLabelKey(profile))}</Text>
               </View>
             ) : (
               <LinearGradient
@@ -328,7 +342,7 @@ export default function UserProfile() {
                 style={styles.followButton}
               >
                 <MaterialIcons name="person-add" size={18} color={COLORS.onImage} />
-                <Text style={styles.followText}>{t("userProfile.follow")}</Text>
+                <Text style={styles.followText}>{t(followLabelKey(profile))}</Text>
               </LinearGradient>
             )}
           </Pressable>

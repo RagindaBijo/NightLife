@@ -34,8 +34,8 @@ module.exports = async ({ call, check, uploadImage, registerUser, registerVenue 
 
   // ── Blocking ──
   await call(`/api/users/${B.userId}/follow`, { method: "PUT", token: A.token });
-  await call(`/api/users/${A.userId}/follow`, { method: "PUT", token: B.token });
-  const feedHas = async (token, authorId) => (await call("/api/posts", { token })).data.some((p) => p.user_id === authorId);
+  await call(`/api/follow-requests/${A.userId}`, { method: "PUT", token: B.token, body: { accept: true } });
+  await call(`/api/users/${A.userId}/follow`, { method: "PUT", token: B.token });  const feedHas = async (token, authorId) => (await call("/api/posts", { token })).data.some((p) => p.user_id === authorId);
   check("before: A sees B's posts", await feedHas(A.token, B.userId), true);
   check("block B", (await call(`/api/users/${B.userId}/block`, { method: "PUT", token: A.token })).data, { is_blocked: true });
   check("A no longer sees B's posts", await feedHas(A.token, B.userId), false);

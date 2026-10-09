@@ -1,5 +1,6 @@
-import { MaterialIcons } from "@expo/vector-icons";
+import { MaterialCommunityIcons, MaterialIcons } from "@expo/vector-icons";
 import { Image } from "expo-image";
+import { LinearGradient } from "expo-linear-gradient";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -7,7 +8,6 @@ import {
   Alert,
   FlatList,
   KeyboardAvoidingView,
-  Platform,
   Pressable,
   Text,
   TextInput,
@@ -18,20 +18,24 @@ import ReportSheet from "../../../components/ReportSheet";
 import { API_URL, api, getSession } from "../../../lib/api";
 import { formatClock, formatTimeLeft } from "../../../lib/format";
 import { useI18n } from "../../../lib/i18n";
-import { refreshUnread } from "../../../lib/unread";
+import { musicIcon, musicLabel, placeIcon, placeLabel } from "../../../lib/preferences";
 import { makeStyles, useTheme } from "../../../lib/theme-context";
+import { refreshUnread } from "../../../lib/unread";
 
 const WS_URL = API_URL.replace(/^http/, "ws");
 const MESSAGE_MAX = 1000;
+const GROUP_GAP_MS = 5 * 60 * 1000; // messages closer than this stack together
+const SEPARATOR_GAP_MS = 30 * 60 * 1000; // a time label after a longer pause
 
 export default function ChatDetail() {
   const { chatId } = useLocalSearchParams();
   const router = useRouter();
-  const { colors: COLORS } = useTheme();
+  const { colors: COLORS, gradients: GRADIENTS } = useTheme();
   const { t } = useI18n();
   const styles = useStyles();
-  const [chat, setChat] = useState(null); // { id, expires_at, user, source }
+  const [chat, setChat] = useState(null); // { id, created_at, expires_at, user, source }
   const [me, setMe] = useState(null);
+  const [shared, setShared] = useState({ music: [], places: [] }); // tastes in common
   const [messages, setMessages] = useState([]); // oldest → newest
   const [hasOlder, setHasOlder] = useState(true);
   const [ended, setEnded] = useState(false);
@@ -61,14 +65,27 @@ export default function ChatDetail() {
     [t],
   );
 
-  // First load: chat info, latest messages, who I am
+  // First load: chat info, latest messages, who I am, and what we both like
   useEffect(() => {
     Promise.all([api(`/api/chats/${chatId}`), api(`/api/chats/${chatId}/messages`), getSession()])
-      .then(([info, latest, session]) => {
+      .then(async ([info, latest, session]) => {
         setChat(info);
         setMe(Number(session?.userId));
         addMessages(latest);
         setHasOlder(latest.length === 50);
+        // Tastes in common for the intro card (a failure just hides that part)
+        try {
+          const [mine, theirs] = await Promise.all([
+            api(`/api/user/${session.userId}`),
+            api(`/api/user/${info.user.id}`),
+          ]);
+          setShared({
+            music: (theirs.music ?? []).filter((key) => (mine.music ?? []).includes(key)),
+            places: (theirs.venue_types ?? []).filter((key) => (mine.venue_types ?? []).includes(key)),
+          });
+        } catch {
+          // intro card without the "you both like" part
+        }
       })
       .catch(handleError);
   }, [chatId, addMessages, handleError]);
@@ -179,7 +196,8 @@ export default function ChatDetail() {
           } catch {
             // already ended
           }
-          router.back();
+          refreshUnread();
+          router.back(); // to the chat list, which reloads when shown
         },
       },
     ]);
@@ -202,51 +220,67 @@ export default function ChatDetail() {
     ]);
 
   const person = chat?.user;
+  const total = chat ? new Date(chat.expires_at) - new Date(chat.created_at) : 1;
+  const left = chat ? Math.max(0, new Date(chat.expires_at) - now) : 0;
 
   const header = (
-    <View style={styles.header}>
-      <Pressable
-        onPress={() => router.back()}
-        hitSlop={10}
-        style={({ pressed }) => [styles.iconButton, pressed && styles.pressed]}
-        accessibilityRole="button"
-        accessibilityLabel={t("common.goBack")}
-      >
-        <MaterialIcons name="arrow-back" size={24} color={COLORS.text} />
-      </Pressable>
-      {person && (
+    <View style={styles.headerWrap}>
+      <View style={styles.header}>
         <Pressable
-          onPress={() => router.push(`/user/${person.id}`)}
-          style={styles.headerPerson}
-          accessibilityRole="button"
-        >
-          {person.profile_photo ? (
-            <Image source={{ uri: person.profile_photo }} style={styles.headerAvatar} contentFit="cover" />
-          ) : (
-            <View style={[styles.headerAvatar, styles.avatarEmpty]}>
-              <MaterialIcons name="person" size={20} color={COLORS.textSecondary} />
-            </View>
-          )}
-          <View style={styles.headerText}>
-            <Text style={styles.headerName} numberOfLines={1}>
-              {person.first_name || person.username}
-            </Text>
-            <Text style={styles.headerSub} numberOfLines={1}>
-              {isEnded ? t("chat.ended") : t("chat.disappearsIn", { time: formatTimeLeft(chat.expires_at, now) })}
-            </Text>
-          </View>
-        </Pressable>
-      )}
-      {person && (
-        <Pressable
-          onPress={() => setMenuOpen(true)}
+          onPress={() => router.back()}
           hitSlop={10}
           style={({ pressed }) => [styles.iconButton, pressed && styles.pressed]}
           accessibilityRole="button"
-          accessibilityLabel={t("block.moreOptions")}
+          accessibilityLabel={t("common.goBack")}
         >
-          <MaterialIcons name="more-horiz" size={26} color={COLORS.text} />
+          <MaterialIcons name="arrow-back" size={24} color={COLORS.text} />
         </Pressable>
+        {person && (
+          <Pressable onPress={() => router.push(`/user/${person.id}`)} style={styles.headerPerson} accessibilityRole="button">
+            <LinearGradient colors={GRADIENTS.brand} style={styles.headerRing}>
+              {person.profile_photo ? (
+                <Image source={{ uri: person.profile_photo }} style={styles.headerAvatar} contentFit="cover" />
+              ) : (
+                <View style={[styles.headerAvatar, styles.avatarEmpty]}>
+                  <MaterialIcons name="person" size={20} color={COLORS.textSecondary} />
+                </View>
+              )}
+            </LinearGradient>
+            <View style={styles.headerText}>
+              <Text style={styles.headerName} numberOfLines={1}>
+                {person.first_name || person.username}
+              </Text>
+              <View style={styles.headerSubRow}>
+                <MaterialIcons name="hourglass-bottom" size={12} color={COLORS.accentPink} />
+                <Text style={styles.headerSub} numberOfLines={1}>
+                  {isEnded ? t("chat.ended") : t("chat.disappearsIn", { time: formatTimeLeft(chat.expires_at, now) })}
+                </Text>
+              </View>
+            </View>
+          </Pressable>
+        )}
+        {person && (
+          <Pressable
+            onPress={() => setMenuOpen(true)}
+            hitSlop={10}
+            style={({ pressed }) => [styles.iconButton, pressed && styles.pressed]}
+            accessibilityRole="button"
+            accessibilityLabel={t("block.moreOptions")}
+          >
+            <MaterialIcons name="more-horiz" size={26} color={COLORS.text} />
+          </Pressable>
+        )}
+      </View>
+      {/* Time left: drains as the chat gets older */}
+      {!!chat && (
+        <View style={styles.timerTrack}>
+          <LinearGradient
+            colors={GRADIENTS.brand}
+            start={{ x: 0, y: 0.5 }}
+            end={{ x: 1, y: 0.5 }}
+            style={[styles.timerFill, { width: `${isEnded ? 0 : Math.max(2, (left / total) * 100)}%` }]}
+          />
+        </View>
       )}
     </View>
   );
@@ -268,39 +302,112 @@ export default function ChatDetail() {
     );
   }
 
+  // Grouping: consecutive messages from the same person stick together, and a
+  // time label appears after a longer pause
+  const rows = messages.map((message, i) => {
+    const prev = messages[i - 1];
+    const next = messages[i + 1];
+    const time = new Date(message.create_date).getTime();
+    const gapBefore = prev ? time - new Date(prev.create_date).getTime() : Infinity;
+    const gapAfter = next ? new Date(next.create_date).getTime() - time : Infinity;
+    return {
+      message,
+      mine: message.sender_id === me,
+      separator: gapBefore > SEPARATOR_GAP_MS,
+      first: !prev || prev.sender_id !== message.sender_id || gapBefore > GROUP_GAP_MS,
+      last: !next || next.sender_id !== message.sender_id || gapAfter > GROUP_GAP_MS,
+    };
+  });
+
+  const intro = (
+    <View style={styles.intro}>
+      <LinearGradient colors={GRADIENTS.brand} style={styles.introRing}>
+        {person.profile_photo ? (
+          <Image source={{ uri: person.profile_photo }} style={styles.introAvatar} contentFit="cover" />
+        ) : (
+          <View style={[styles.introAvatar, styles.avatarEmpty]}>
+            <MaterialIcons name="person" size={44} color={COLORS.textSecondary} />
+          </View>
+        )}
+      </LinearGradient>
+      <Text style={styles.introTitle}>
+        {t(`chat.introTitle.${chat.source}`, { name: person.first_name || person.username })}
+      </Text>
+      <Text style={styles.introText}>{t("chat.introText", { count: Math.round(total / 3600000) })}</Text>
+      {(shared.music.length > 0 || shared.places.length > 0) && (
+        <>
+          <Text style={styles.introLabel}>{t("chat.bothLike")}</Text>
+          <View style={styles.introChips}>
+            {shared.music.map((key) => (
+              <View key={`m-${key}`} style={styles.introChip}>
+                <MaterialCommunityIcons name={musicIcon(key)} size={13} color={COLORS.accent} />
+                <Text style={styles.introChipText}>{musicLabel(key)}</Text>
+              </View>
+            ))}
+            {shared.places.map((key) => (
+              <View key={`p-${key}`} style={styles.introChip}>
+                <MaterialCommunityIcons name={placeIcon(key)} size={13} color={COLORS.accent} />
+                <Text style={styles.introChipText}>{placeLabel(key)}</Text>
+              </View>
+            ))}
+          </View>
+        </>
+      )}
+    </View>
+  );
+
   return (
-    <KeyboardAvoidingView style={styles.container} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+    // "padding" on Android too: with edge-to-edge the system no longer resizes the screen for the keyboard
+    <KeyboardAvoidingView style={styles.container} behavior="padding">
       {header}
 
       <FlatList
         style={styles.list}
         contentContainerStyle={styles.listContent}
-        data={[...messages].reverse()}
+        data={[...rows].reverse()}
         inverted
-        keyExtractor={(m) => String(m.id)}
+        keyExtractor={(row) => String(row.message.id)}
         onEndReached={loadOlder}
         onEndReachedThreshold={0.3}
         keyboardDismissMode="on-drag"
-        ListEmptyComponent={
-          <View style={styles.emptyChat}>
-            <Text style={styles.notice}>
-              {chat.source === "match" ? t("chat.matchStart") : t("chat.startHint")}
-            </Text>
-          </View>
-        }
-        renderItem={({ item }) => {
-          const mine = item.sender_id === me;
-          return (
-            <View style={[styles.bubbleRow, mine && styles.bubbleRowMine]}>
-              <View style={[styles.bubble, mine ? styles.bubbleMine : styles.bubbleTheirs]}>
-                <Text style={[styles.bubbleText, mine && styles.bubbleTextMine]}>{item.body}</Text>
-                <Text style={[styles.bubbleTime, mine && styles.bubbleTimeMine]}>
-                  {formatClock(new Date(item.create_date))}
-                </Text>
+        // The list is upside down, so the "footer" is at the top: the intro card
+        ListFooterComponent={hasOlder && messages.length >= 50 ? null : intro}
+        renderItem={({ item }) => (
+          <View>
+            {item.separator && (
+              <View style={styles.separator}>
+                <Text style={styles.separatorText}>{dayAndTime(item.message.create_date, t)}</Text>
               </View>
+            )}
+            <View
+              style={[
+                styles.bubbleRow,
+                item.mine && styles.bubbleRowMine,
+                item.first ? styles.groupStart : styles.groupMiddle,
+              ]}
+            >
+              {item.mine ? (
+                <LinearGradient
+                  colors={GRADIENTS.brand}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 1 }}
+                  style={[styles.bubble, styles.bubbleMine, !item.last && styles.bubbleMineJoined]}
+                >
+                  <Text style={styles.bubbleTextMine}>{item.message.body}</Text>
+                </LinearGradient>
+              ) : (
+                <View style={[styles.bubble, styles.bubbleTheirs, !item.last && styles.bubbleTheirsJoined]}>
+                  <Text style={styles.bubbleText}>{item.message.body}</Text>
+                </View>
+              )}
             </View>
-          );
-        }}
+            {item.last && (
+              <Text style={[styles.bubbleTime, item.mine && styles.bubbleTimeMine]}>
+                {formatClock(new Date(item.message.create_date))}
+              </Text>
+            )}
+          </View>
+        )}
       />
 
       {isEnded ? (
@@ -309,28 +416,35 @@ export default function ChatDetail() {
         </View>
       ) : (
         <View style={styles.inputBar}>
-          <TextInput
-            style={styles.input}
-            value={text}
-            onChangeText={setText}
-            placeholder={t("chat.messagePlaceholder")}
-            placeholderTextColor={COLORS.placeholder}
-            selectionColor={COLORS.accent}
-            multiline
-            maxLength={MESSAGE_MAX}
-          />
+          <View style={styles.inputPill}>
+            <TextInput
+              style={styles.input}
+              value={text}
+              onChangeText={setText}
+              placeholder={t("chat.messagePlaceholder")}
+              placeholderTextColor={COLORS.placeholder}
+              selectionColor={COLORS.accent}
+              multiline
+              maxLength={MESSAGE_MAX}
+            />
+            {text.length > MESSAGE_MAX - 100 && (
+              <Text style={styles.counter}>{MESSAGE_MAX - text.length}</Text>
+            )}
+          </View>
           <Pressable
             onPress={send}
             disabled={!text.trim() || sending}
-            style={({ pressed }) => [styles.sendButton, (!text.trim() || sending) && styles.disabled, pressed && styles.pressed]}
+            style={({ pressed }) => [(!text.trim() || sending) && styles.disabled, pressed && styles.pressed]}
             accessibilityRole="button"
             accessibilityLabel={t("chat.send")}
           >
-            {sending ? (
-              <ActivityIndicator color={COLORS.onAccent} size="small" />
-            ) : (
-              <MaterialIcons name="send" size={20} color={COLORS.onAccent} />
-            )}
+            <LinearGradient colors={GRADIENTS.brand} style={styles.sendButton}>
+              {sending ? (
+                <ActivityIndicator color={COLORS.onImage} size="small" />
+              ) : (
+                <MaterialIcons name="arrow-upward" size={22} color={COLORS.onImage} />
+              )}
+            </LinearGradient>
           </Pressable>
         </View>
       )}
@@ -355,13 +469,30 @@ export default function ChatDetail() {
   );
 }
 
+/** "Today · 21:04", "Yesterday · 23:10" or "3 Oct · 01:15". */
+function dayAndTime(iso, t) {
+  const date = new Date(iso);
+  const today = new Date();
+  const yesterday = new Date();
+  yesterday.setDate(today.getDate() - 1);
+  const day =
+    date.toDateString() === today.toDateString()
+      ? t("time.today")
+      : date.toDateString() === yesterday.toDateString()
+        ? t("chat.yesterday")
+        : `${date.getDate()} ${t("months.short")[date.getMonth()]}`;
+  return `${day} · ${formatClock(date)}`;
+}
+
 function EndedNotice({ onBack }) {
   const { colors: COLORS } = useTheme();
   const { t } = useI18n();
   const styles = useStyles();
   return (
     <View style={styles.ended}>
-      <MaterialIcons name="hourglass-bottom" size={26} color={COLORS.textSecondary} />
+      <View style={styles.endedIcon}>
+        <MaterialIcons name="hourglass-bottom" size={24} color={COLORS.accentPink} />
+      </View>
       <Text style={styles.endedTitle}>{t("chat.endedTitle")}</Text>
       <Text style={styles.notice}>{t("chat.endedText")}</Text>
       <Pressable onPress={onBack} style={({ pressed }) => [styles.endedButton, pressed && styles.pressed]}>
@@ -376,14 +507,15 @@ const useStyles = makeStyles((COLORS) => ({
     flex: 1,
     backgroundColor: COLORS.background,
   },
+  headerWrap: {
+    backgroundColor: COLORS.backgroundElevated,
+  },
   header: {
     flexDirection: "row",
     alignItems: "center",
     gap: 6,
     paddingHorizontal: 8,
     paddingVertical: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.border,
   },
   iconButton: {
     width: 40,
@@ -397,37 +529,124 @@ const useStyles = makeStyles((COLORS) => ({
     alignItems: "center",
     gap: 10,
   },
+  headerRing: {
+    padding: 2,
+    borderRadius: 22,
+  },
   headerAvatar: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
     backgroundColor: COLORS.surface,
   },
   avatarEmpty: {
     alignItems: "center",
     justifyContent: "center",
+    backgroundColor: COLORS.surface,
   },
   headerText: {
     flex: 1,
   },
   headerName: {
     color: COLORS.text,
-    fontSize: 16,
-    fontWeight: "700",
+    fontSize: 17,
+    fontWeight: "800",
+  },
+  headerSubRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    marginTop: 1,
   },
   headerSub: {
     color: COLORS.accentPink,
     fontSize: 12,
-    fontWeight: "600",
-    marginTop: 1,
+    fontWeight: "700",
+  },
+  timerTrack: {
+    height: 3,
+    backgroundColor: COLORS.surfacePressed,
+  },
+  timerFill: {
+    height: "100%",
   },
   list: {
     flex: 1,
   },
   listContent: {
-    padding: 12,
-    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
     flexGrow: 1,
+  },
+  intro: {
+    alignItems: "center",
+    paddingVertical: 24,
+    paddingHorizontal: 20,
+  },
+  introRing: {
+    padding: 3,
+    borderRadius: 50,
+  },
+  introAvatar: {
+    width: 86,
+    height: 86,
+    borderRadius: 43,
+    borderWidth: 3,
+    borderColor: COLORS.background,
+  },
+  introTitle: {
+    color: COLORS.text,
+    fontSize: 18,
+    fontWeight: "800",
+    textAlign: "center",
+    marginTop: 12,
+  },
+  introText: {
+    color: COLORS.textSecondary,
+    fontSize: 13,
+    textAlign: "center",
+    marginTop: 4,
+  },
+  introLabel: {
+    color: COLORS.textSecondary,
+    fontSize: 12,
+    fontWeight: "800",
+    letterSpacing: 0.5,
+    marginTop: 16,
+  },
+  introChips: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    justifyContent: "center",
+    gap: 6,
+    marginTop: 8,
+  },
+  introChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    paddingVertical: 5,
+    paddingHorizontal: 10,
+    borderRadius: 14,
+    backgroundColor: COLORS.accentSoft,
+  },
+  introChipText: {
+    color: COLORS.accent,
+    fontSize: 13,
+    fontWeight: "700",
+  },
+  separator: {
+    alignSelf: "center",
+    marginVertical: 12,
+    paddingVertical: 4,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    backgroundColor: COLORS.surface,
+  },
+  separatorText: {
+    color: COLORS.textSecondary,
+    fontSize: 12,
+    fontWeight: "600",
   },
   bubbleRow: {
     flexDirection: "row",
@@ -436,45 +655,52 @@ const useStyles = makeStyles((COLORS) => ({
   bubbleRowMine: {
     justifyContent: "flex-end",
   },
+  groupStart: {
+    marginTop: 10,
+  },
+  groupMiddle: {
+    marginTop: 3,
+  },
   bubble: {
-    maxWidth: "80%",
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    borderRadius: 18,
+    maxWidth: "78%",
+    paddingVertical: 9,
+    paddingHorizontal: 14,
+    borderRadius: 20,
+  },
+  bubbleMine: {
+    borderBottomRightRadius: 6,
+  },
+  bubbleMineJoined: {
+    borderBottomRightRadius: 20,
+    borderTopRightRadius: 8,
   },
   bubbleTheirs: {
     backgroundColor: COLORS.surface,
     borderBottomLeftRadius: 6,
   },
-  bubbleMine: {
-    backgroundColor: COLORS.accent,
-    borderBottomRightRadius: 6,
+  bubbleTheirsJoined: {
+    borderBottomLeftRadius: 20,
+    borderTopLeftRadius: 8,
   },
   bubbleText: {
     color: COLORS.text,
     fontSize: 15,
-    lineHeight: 20,
+    lineHeight: 21,
   },
   bubbleTextMine: {
-    color: COLORS.onAccent,
+    color: "#FFFFFF",
+    fontSize: 15,
+    lineHeight: 21,
   },
   bubbleTime: {
     color: COLORS.textSecondary,
     fontSize: 11,
     marginTop: 3,
-    alignSelf: "flex-end",
+    marginLeft: 6,
   },
   bubbleTimeMine: {
-    color: COLORS.onAccent,
-    opacity: 0.7,
-  },
-  emptyChat: {
-    flex: 1,
-    alignItems: "center",
-    justifyContent: "center",
-    padding: 32,
-    // The list is inverted, so flip the empty message back upright
-    transform: [{ scaleY: -1 }],
+    alignSelf: "flex-end",
+    marginRight: 6,
   },
   notice: {
     color: COLORS.textSecondary,
@@ -486,33 +712,44 @@ const useStyles = makeStyles((COLORS) => ({
     flexDirection: "row",
     alignItems: "flex-end",
     gap: 8,
-    padding: 10,
-    borderTopWidth: 1,
-    borderTopColor: COLORS.border,
-    backgroundColor: COLORS.background,
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+    backgroundColor: COLORS.backgroundElevated,
+  },
+  inputPill: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "flex-end",
+    minHeight: 44,
+    paddingHorizontal: 16,
+    borderRadius: 22,
+    backgroundColor: COLORS.surface,
+    borderWidth: 1,
+    borderColor: COLORS.border,
   },
   input: {
     flex: 1,
-    minHeight: 42,
     maxHeight: 120,
-    paddingHorizontal: 14,
     paddingTop: 11,
     paddingBottom: 11,
-    borderRadius: 21,
-    backgroundColor: COLORS.surface,
     color: COLORS.text,
     fontSize: 15,
   },
+  counter: {
+    color: COLORS.textSecondary,
+    fontSize: 11,
+    marginBottom: 13,
+    marginLeft: 6,
+  },
   sendButton: {
-    width: 42,
-    height: 42,
-    borderRadius: 21,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: COLORS.accent,
   },
   disabled: {
-    opacity: 0.45,
+    opacity: 0.4,
   },
   pressed: {
     opacity: 0.7,
@@ -525,12 +762,19 @@ const useStyles = makeStyles((COLORS) => ({
   },
   endedBar: {
     padding: 16,
-    borderTopWidth: 1,
-    borderTopColor: COLORS.border,
+    backgroundColor: COLORS.backgroundElevated,
   },
   ended: {
     alignItems: "center",
     gap: 6,
+  },
+  endedIcon: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: COLORS.surface,
   },
   endedTitle: {
     color: COLORS.text,
@@ -541,7 +785,7 @@ const useStyles = makeStyles((COLORS) => ({
     marginTop: 8,
     paddingVertical: 10,
     paddingHorizontal: 18,
-    borderRadius: 12,
+    borderRadius: 14,
     backgroundColor: COLORS.surface,
   },
   endedButtonText: {

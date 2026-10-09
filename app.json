@@ -27,7 +27,7 @@
         "expo-splash-screen",
         {
           "image": "./assets/images/splash-icon.png",
-          "imageWidth": 200,
+          "imageWidth": 220,
           "resizeMode": "contain",
           "backgroundColor": "#000000"
         }
@@ -36,10 +36,27 @@
       "expo-image",
       "expo-secure-store",
       "expo-status-bar",
-      "expo-notifications"
+      "expo-notifications",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Choose photos for your profile, posts and venue gallery.",
+          "cameraPermission": "The camera lets you take photos for your profile and posts.",
+          "microphonePermission": false
+        }
+      ],
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Your location is used to show venues and events near you on the map.",
+          "locationAlwaysAndWhenInUsePermission": false,
+          "locationAlwaysPermission": false
+        }
+      ]
     ],
-    "experiments": {
-      "typedRoutes": true
+    "locales": {
+      "ka": "./languages/ka.json",
+      "ru": "./languages/ru.json"
     }
   }
 }

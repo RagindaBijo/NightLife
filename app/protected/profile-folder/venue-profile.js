@@ -624,16 +624,11 @@ export default function VenueProfile() {
     setVisibilitySaving(false);
   };
 
+  // The system photo picker needs no permission: the app only gets the photos the user picks
   const addPhoto = async () => {
     try {
-      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-      if (status !== "granted") {
-        Alert.alert(t("common.permissionDenied"), t("common.photosPermission"));
-        return;
-      }
-
       const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        mediaTypes: ["images"],
         allowsEditing: false,
         quality: 1,
       });

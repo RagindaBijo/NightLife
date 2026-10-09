@@ -19,6 +19,7 @@ import CompleteProfileNotice, { missingProfileFields } from "../../../components
 import FavoriteStar from "../../../components/FavoriteStar";
 import InterestCheck from "../../../components/InterestCheck";
 import SwipeableTabContent from "../../../components/SwipeableTabContent";
+import TasteStrip from "../../../components/TasteStrip";
 import { api, getSession } from "../../../lib/api";
 import { eventStart, formatEventTime } from "../../../lib/format";
 import { translate, useI18n } from "../../../lib/i18n";
@@ -227,6 +228,8 @@ export default function Profile() {
           t("profile.unnamedUser"),
         username: userData.username || "",
         bio: userData.bio_text || "",
+        music: userData.music ?? [],
+        places: userData.venue_types ?? [],
         profileImage: userData.profile_photo || null,
         followers: userData.followers_count,
         following: userData.following_count,
@@ -572,6 +575,7 @@ export default function Profile() {
 
         <Text style={styles.name}>{user.name}</Text>
         {!!user.bio && <Text style={styles.bio}>{user.bio}</Text>}
+        <TasteStrip music={user.music} places={user.places} />
 
         {user.missing.length > 0 && <CompleteProfileNotice missing={user.missing} compact />}
 
